@@ -63,9 +63,13 @@ class ReceiverController extends ChangeNotifier {
   String phase = 'browsing';
   String? detail;
   double? fps;
+  double? displayedFps;
   double? latencyMs;
   int droppedFrames = 0;
+  int receiverDrops = 0;
+  int bufferDepth = 0;
   bool showStats = false;
+  bool smooth = true;
   bool chrome = true;
 
   bool get connected => phase == 'connected';
@@ -84,13 +88,26 @@ class ReceiverController extends ChangeNotifier {
         this.detail = detail;
         if (phase != 'connected') {
           fps = null;
+          displayedFps = null;
           latencyMs = null;
           droppedFrames = 0;
+          receiverDrops = 0;
+          bufferDepth = 0;
         }
-      case ReceiverStatsChanged(:final fps, :final latencyMs, :final dropped):
+      case ReceiverStatsChanged(
+        :final fps,
+        :final displayedFps,
+        :final latencyMs,
+        :final dropped,
+        :final receiverDrops,
+        :final bufferDepth,
+      ):
         this.fps = fps;
+        this.displayedFps = displayedFps;
         this.latencyMs = latencyMs;
         droppedFrames = dropped;
+        this.receiverDrops = receiverDrops;
+        this.bufferDepth = bufferDepth;
     }
     notifyListeners();
   }
@@ -104,6 +121,12 @@ class ReceiverController extends ChangeNotifier {
   }
 
   Future<void> disconnect() => client.disconnect();
+
+  Future<void> toggleSmooth() async {
+    smooth = !smooth;
+    notifyListeners();
+    await client.setSmooth(smooth);
+  }
 
   void toggleStats() {
     showStats = !showStats;
@@ -168,8 +191,11 @@ class _ReceiverPageState extends State<ReceiverPage> {
                   right: 16,
                   child: _Stats(
                     fps: controller.fps,
+                    displayedFps: controller.displayedFps,
                     latencyMs: controller.latencyMs,
                     dropped: controller.droppedFrames,
+                    receiverDrops: controller.receiverDrops,
+                    bufferDepth: controller.bufferDepth,
                   ),
                 ),
             ],
@@ -325,6 +351,12 @@ class _ConnectedChrome extends StatelessWidget {
                 ),
               ),
               TextButton(
+                onPressed: controller.toggleSmooth,
+                child: Text(
+                  controller.smooth ? 'Suave' : 'Ultra baixa latência',
+                ),
+              ),
+              TextButton(
                 onPressed: controller.toggleStats,
                 child: Text(controller.showStats ? 'Ocultar dados' : 'Dados'),
               ),
@@ -343,13 +375,19 @@ class _ConnectedChrome extends StatelessWidget {
 class _Stats extends StatelessWidget {
   const _Stats({
     required this.fps,
+    required this.displayedFps,
     required this.latencyMs,
     required this.dropped,
+    required this.receiverDrops,
+    required this.bufferDepth,
   });
 
   final double? fps;
+  final double? displayedFps;
   final double? latencyMs;
   final int dropped;
+  final int receiverDrops;
+  final int bufferDepth;
 
   @override
   Widget build(BuildContext context) {
@@ -365,7 +403,14 @@ class _Stats extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             Text(
-              formatFps(fps),
+              '${formatFps(fps)} chegam',
+              style: const TextStyle(
+                color: CapturaColors.ink,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
+            Text(
+              '${formatFps(displayedFps)} na tela',
               style: const TextStyle(
                 color: CapturaColors.ink,
                 fontFeatures: [FontFeature.tabularFigures()],
@@ -379,7 +424,7 @@ class _Stats extends StatelessWidget {
               ),
             ),
             Text(
-              'descartes $dropped',
+              'rede $dropped · tela $receiverDrops · buffer $bufferDepth',
               style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
             ),
             const Text(

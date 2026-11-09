@@ -37,6 +37,11 @@ class FakeReceiverClient implements ReceiverClient {
   Future<void> disconnect() async {
     calls.add('disconnect');
   }
+
+  @override
+  Future<void> setSmooth(bool smooth) async {
+    calls.add('smooth:$smooth');
+  }
 }
 
 void main() {

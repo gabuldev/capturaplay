@@ -90,6 +90,7 @@ class MethodChannelCaptureClient implements CaptureClient {
       'bitrateMbps': request.bitrateMbps,
       'height': request.height,
       'lowLatency': request.lowLatency,
+      'smooth': request.smooth,
     });
   }
 

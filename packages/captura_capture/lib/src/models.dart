@@ -177,12 +177,16 @@ class StreamingRequest {
     required this.bitrateMbps,
     required this.height,
     this.lowLatency = true,
+    this.smooth = true,
   });
 
   final bool enabled;
   final int bitrateMbps;
   final int height;
   final bool lowLatency;
+
+  /// Suave keeps a few frames in flight. Ultra drops as soon as one send is busy.
+  final bool smooth;
 }
 
 class StreamStatusChanged extends CaptureEvent {

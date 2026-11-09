@@ -121,6 +121,26 @@ class ControlBar extends StatelessWidget {
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   FieldMenu(
+                    label: 'Ritmo',
+                    value: controller.smoothPlayback
+                        ? 'Suave'
+                        : 'Ultra baixa latência',
+                    enabled: true,
+                    entries: [
+                      MenuEntry(
+                        id: 'smooth',
+                        label: 'Suave',
+                        selected: controller.smoothPlayback,
+                      ),
+                      MenuEntry(
+                        id: 'ultra',
+                        label: 'Ultra baixa latência',
+                        selected: !controller.smoothPlayback,
+                      ),
+                    ],
+                    onSelected: (id) => controller.chooseSmooth(id != 'ultra'),
+                  ),
+                  FieldMenu(
                     label: 'Modo',
                     value: controller.lowLatency ? 'Latência' : 'Qualidade',
                     enabled: true,

@@ -112,7 +112,7 @@ class FakeCaptureClient implements CaptureClient {
   @override
   Future<void> setStreaming(StreamingRequest request) async {
     calls.add(
-      'setStreaming:${request.enabled}:${request.bitrateMbps}:${request.height}:${request.lowLatency}',
+      'setStreaming:${request.enabled}:${request.bitrateMbps}:${request.height}:${request.lowLatency}:${request.smooth}',
     );
   }
 }

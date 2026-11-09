@@ -176,7 +176,7 @@ Na primeira vez o Xcode pede um time de assinatura. Abra `ios/Runner.xcworkspace
 
 O app abre deitado, sem barra de status, e procura o Mac sozinho. Se o Bonjour não aparecer, digite o IP do Mac. A permissão de rede local tem de ser aceita. Toque na imagem para ver os dados (fps e latência estimada) e para desconectar. Se a ligação cair, ele tenta de novo. A tela não apaga enquanto o receptor está aberto.
 
-O modo **Latência** (padrão) manda 720p a 8 Mb/s, com o encoder sem segurar quadro e um único quadro por vez no TCP. Se o Wi-Fi atrasar, o quadro velho é descartado e o próximo é um keyframe, em vez de a fila crescer. **Qualidade** sobe para 1080p a 14 Mb/s. Os dois toques ficam na barra depois de ligar a transmissão.
+O modo **Latência** (padrão) manda 720p a 8 Mb/s. **Qualidade** sobe para 1080p a 14 Mb/s. O ritmo **Suave** (padrão) deixa dois ou três quadros no caminho para o movimento não pular; **Ultra baixa latência** volta a descartar assim que o envio anterior ainda não terminou. No iPhone o mesmo toque **Suave** segura um quadro e solta no ritmo da tela. Os dados mostram fps que chegam, fps na tela, perdas na rede, perdas na tela e a profundidade do buffer.
 
 O número no iPhone, “captura → tela”, é o instante em que o quadro saiu da captura no Mac até o instante em que entrou na tela do telefone, com o relógio alinhado por um ping no estilo NTP. Não é fotodiodo, mas dá para comparar antes e depois na mesma rede. “Descartes” conta quadros que não chegaram em sequência.
 

@@ -380,6 +380,54 @@ int glassLatencyUs({
 
 int clampStreamBitrateMbps(int value) => value.clamp(6, 20);
 
+/// How many encoded frames may be waiting on the socket.
+///
+/// One in flight looks like "lowest latency" but on Wi-Fi the previous send
+/// is still completing when the next 16 ms frame arrives, so that rule drops
+/// constantly and then freezes until a keyframe. Smooth keeps a short window.
+int maxVideoSendsInFlight({required bool smooth}) => smooth ? 3 : 1;
+
+int maxEncodeInFlight({required bool smooth}) => smooth ? 2 : 1;
+
+class FrameSendDecision {
+  const FrameSendDecision({
+    required this.send,
+    required this.requestKeyframe,
+    required this.holdForKeyframe,
+  });
+
+  final bool send;
+  final bool requestKeyframe;
+  final bool holdForKeyframe;
+}
+
+FrameSendDecision decideFrameSend({
+  required bool smooth,
+  required int pendingSends,
+  required bool keyframe,
+  required bool dropUntilKeyframe,
+}) {
+  if (pendingSends >= maxVideoSendsInFlight(smooth: smooth)) {
+    return const FrameSendDecision(
+      send: false,
+      requestKeyframe: true,
+      holdForKeyframe: true,
+    );
+  }
+  if (dropUntilKeyframe && !keyframe) {
+    return const FrameSendDecision(
+      send: false,
+      requestKeyframe: false,
+      holdForKeyframe: true,
+    );
+  }
+  return const FrameSendDecision(
+    send: true,
+    requestKeyframe: false,
+    holdForKeyframe: false,
+  );
+}
+
 class StreamTune {
   const StreamTune({
     required this.lowLatency,

@@ -34,6 +34,7 @@ class StudioController extends ChangeNotifier {
   int streamBitrateMbps = 8;
   int streamHeight = 720;
   bool lowLatency = true;
+  bool smoothPlayback = true;
   int streamClients = 0;
   String? streamError;
 
@@ -136,6 +137,12 @@ class StudioController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> chooseSmooth(bool smooth) async {
+    smoothPlayback = smooth;
+    await _pushStreaming();
+    notifyListeners();
+  }
+
   Future<void> chooseLatencyMode(bool lowLatency) async {
     final tune = tuneForLatency(lowLatency);
     this.lowLatency = tune.lowLatency;
@@ -153,6 +160,7 @@ class StudioController extends ChangeNotifier {
           bitrateMbps: streamBitrateMbps,
           height: streamHeight,
           lowLatency: lowLatency,
+          smooth: smoothPlayback,
         ),
       );
       if (streaming) streamError = null;

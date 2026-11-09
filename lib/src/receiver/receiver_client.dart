@@ -28,13 +28,19 @@ class ReceiverPhaseChanged extends ReceiverEvent {
 class ReceiverStatsChanged extends ReceiverEvent {
   const ReceiverStatsChanged({
     required this.fps,
+    this.displayedFps,
     this.latencyMs,
     this.dropped = 0,
+    this.receiverDrops = 0,
+    this.bufferDepth = 0,
   });
 
   final double fps;
+  final double? displayedFps;
   final double? latencyMs;
   final int dropped;
+  final int receiverDrops;
+  final int bufferDepth;
 }
 
 abstract class ReceiverClient {
@@ -49,6 +55,8 @@ abstract class ReceiverClient {
   Future<void> connectHost(String host, int port);
 
   Future<void> disconnect();
+
+  Future<void> setSmooth(bool smooth);
 }
 
 class MethodChannelReceiverClient implements ReceiverClient {
@@ -90,6 +98,11 @@ class MethodChannelReceiverClient implements ReceiverClient {
 
   @override
   Future<void> disconnect() => _methods.invokeMethod<void>('disconnect');
+
+  @override
+  Future<void> setSmooth(bool smooth) {
+    return _methods.invokeMethod<void>('setSmooth', {'smooth': smooth});
+  }
 }
 
 ReceiverEvent? _decode(Object? raw) {
@@ -114,12 +127,18 @@ ReceiverEvent? _decode(Object? raw) {
       );
     case 'stats':
       final fps = map['fps'];
+      final displayed = map['displayedFps'];
       final latency = map['latencyMs'];
       final dropped = map['dropped'];
+      final receiverDrops = map['receiverDrops'];
+      final bufferDepth = map['bufferDepth'];
       return ReceiverStatsChanged(
         fps: fps is num ? fps.toDouble() : 0,
+        displayedFps: displayed is num ? displayed.toDouble() : null,
         latencyMs: latency is num ? latency.toDouble() : null,
         dropped: dropped is num ? dropped.toInt() : 0,
+        receiverDrops: receiverDrops is num ? receiverDrops.toInt() : 0,
+        bufferDepth: bufferDepth is num ? bufferDepth.toInt() : 0,
       );
     default:
       return null;

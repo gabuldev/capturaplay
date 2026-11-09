@@ -3,6 +3,7 @@ import CoreMedia
 import Flutter
 import Foundation
 import Network
+import QuartzCore
 import UIKit
 import VideoToolbox
 
@@ -40,6 +41,10 @@ public final class CapturaReceiverPlugin: NSObject, FlutterPlugin, FlutterStream
             result(nil)
         case "disconnect":
             hub.disconnect()
+            result(nil)
+        case "setSmooth":
+            let smooth = (args["smooth"] as? Bool) ?? (args["smooth"] as? NSNumber)?.boolValue ?? true
+            hub.setSmooth(smooth)
             result(nil)
         default:
             result(FlutterMethodNotImplemented)
@@ -130,11 +135,19 @@ final class ReceiverHub {
     private var lastKeyframe: CMSampleBuffer?
     private weak var display: DisplayHostView?
     private var pingTimer: DispatchSourceTimer?
+    private let stateLock = NSLock()
+    private var smoothPlayback = true
+    private var jitter: [HeldFrame] = []
+    private var lastPresent = CFTimeInterval(0)
+    private let pacer = DisplayPacer()
     private var clockOffsetUs: Int64 = 0
-    private var frameTimes: [CFTimeInterval] = []
+    private var receivedTimes: [CFTimeInterval] = []
+    private var displayedTimes: [CFTimeInterval] = []
     private var lastStats: CFTimeInterval = 0
     private var lastSequence: UInt16?
-    private var droppedFrames = 0
+    private var networkDrops = 0
+    private var displayDrops = 0
+    private var lastLatencyMs = 0.0
 
     func start() {
         DispatchQueue.main.async {
@@ -147,6 +160,19 @@ final class ReceiverHub {
             self.startPing()
             self.emitState(phase: "browsing", detail: nil)
         }
+        pacer.onTick = { [weak self] in
+            self?.pace()
+        }
+        pacer.start()
+    }
+
+    func setSmooth(_ value: Bool) {
+        stateLock.lock()
+        smoothPlayback = value
+        if !value {
+            jitter.removeAll()
+        }
+        stateLock.unlock()
     }
 
     func stop() {
@@ -158,7 +184,11 @@ final class ReceiverHub {
             self.browser = nil
             self.pingTimer?.cancel()
             self.pingTimer = nil
+            self.stateLock.lock()
+            self.jitter.removeAll()
+            self.stateLock.unlock()
         }
+        pacer.stop()
         DispatchQueue.main.async {
             UIApplication.shared.isIdleTimerDisabled = false
         }
@@ -403,7 +433,12 @@ final class ReceiverHub {
             lastKeyframe = sample
         }
         noteSequence(prefix.sequence)
-        present(sample, keyframe: prefix.keyframe, captureHostUs: prefix.captureHostUs)
+        noteReceived()
+        if isSmooth() {
+            hold(sample, keyframe: prefix.keyframe, captureHostUs: prefix.captureHostUs, sequence: prefix.sequence)
+        } else {
+            present(sample, keyframe: prefix.keyframe, captureHostUs: prefix.captureHostUs)
+        }
     }
 
     private func markDisplayImmediately(_ sample: CMSampleBuffer) {
@@ -443,7 +478,8 @@ final class ReceiverHub {
                 if enqueued {
                     self.noteDisplayed(captureHostUs: captureHostUs, displayedAt: displayedAt)
                 } else {
-                    self.droppedFrames += 1
+                    self.displayDrops += 1
+                    self.emitStats(bufferDepth: 0)
                 }
             }
         }
@@ -453,7 +489,7 @@ final class ReceiverHub {
         if let lastSequence {
             let gap = Int(sequence &- lastSequence)
             if gap > 1 && gap < 240 {
-                droppedFrames += gap - 1
+                networkDrops += gap - 1
             }
         }
         lastSequence = sequence
@@ -462,17 +498,101 @@ final class ReceiverHub {
     private func noteDisplayed(captureHostUs: UInt64, displayedAt: UInt64) {
         guard captureHostUs != 0 else { return } // re-shown cached keyframe: no timing data
         let now = CACurrentMediaTime()
-        frameTimes.append(now)
-        frameTimes.removeAll { now - $0 > 1 }
+        displayedTimes.append(now)
+        displayedTimes.removeAll { now - $0 > 1 }
+        let latencyUs = Int64(bitPattern: displayedAt) + clockOffsetUs - Int64(bitPattern: captureHostUs)
+        if latencyUs > 0 && latencyUs < 2_000_000 {
+            lastLatencyMs = Double(latencyUs) / 1000.0
+        }
+        emitStats(bufferDepth: bufferDepth())
+    }
+
+    private func noteReceived() {
+        let now = CACurrentMediaTime()
+        receivedTimes.append(now)
+        receivedTimes.removeAll { now - $0 > 1 }
+    }
+
+    private func isSmooth() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return smoothPlayback
+    }
+
+    private func bufferDepth() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return jitter.count
+    }
+
+    private func hold(_ sample: CMSampleBuffer, keyframe: Bool, captureHostUs: UInt64, sequence: UInt16) {
+        let frame = HeldFrame(sample: sample, keyframe: keyframe, captureHostUs: captureHostUs, sequence: sequence)
+        stateLock.lock()
+        jitter.append(frame)
+        while jitter.count > 3 {
+            jitter.removeFirst()
+            displayDrops += 1
+            while let next = jitter.first, !next.keyframe {
+                jitter.removeFirst()
+                displayDrops += 1
+            }
+        }
+        let depth = jitter.count
+        stateLock.unlock()
+        emitStats(bufferDepth: depth)
+    }
+
+    private func pace() {
+        let now = CACurrentMediaTime()
+        stateLock.lock()
+        guard smoothPlayback else {
+            stateLock.unlock()
+            return
+        }
+        let due = now - lastPresent >= 0.014
+        let ahead = jitter.count > 1
+        guard !jitter.isEmpty, due || ahead else {
+            stateLock.unlock()
+            return
+        }
+        let frame = jitter.removeFirst()
+        let depth = jitter.count
+        stateLock.unlock()
+        lastPresent = now
+        show(frame, bufferDepth: depth)
+    }
+
+    private func show(_ frame: HeldFrame, bufferDepth: Int) {
+        guard let layer = display?.sampleLayer else { return }
+        if layer.status == .failed {
+            layer.flush()
+        }
+        if layer.isReadyForMoreMediaData {
+            layer.enqueue(frame.sample)
+            let displayedAt = Self.nowUs()
+            queue.async {
+                self.noteDisplayed(captureHostUs: frame.captureHostUs, displayedAt: displayedAt)
+            }
+        } else {
+            queue.async {
+                self.displayDrops += 1
+                self.emitStats(bufferDepth: bufferDepth)
+            }
+        }
+    }
+
+    private func emitStats(bufferDepth: Int) {
+        let now = CACurrentMediaTime()
         guard now - lastStats >= 0.25 else { return }
         lastStats = now
-        let latencyUs = Int64(bitPattern: displayedAt) + clockOffsetUs - Int64(bitPattern: captureHostUs)
-        let latencyMs = latencyUs > 0 && latencyUs < 2_000_000 ? Double(latencyUs) / 1000.0 : 0
         emit(event: [
             "type": "stats",
-            "fps": Double(frameTimes.count),
-            "latencyMs": latencyMs,
-            "dropped": droppedFrames,
+            "fps": Double(receivedTimes.count),
+            "displayedFps": Double(displayedTimes.count),
+            "latencyMs": lastLatencyMs,
+            "dropped": networkDrops,
+            "receiverDrops": displayDrops,
+            "bufferDepth": bufferDepth,
         ])
     }
 
@@ -515,5 +635,34 @@ final class ReceiverHub {
 
     private static func nowUs() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1_000_000)
+    }
+}
+
+private struct HeldFrame {
+    let sample: CMSampleBuffer
+    let keyframe: Bool
+    let captureHostUs: UInt64
+    let sequence: UInt16
+}
+
+private final class DisplayPacer: NSObject {
+    var onTick: (() -> Void)?
+    private var link: CADisplayLink?
+
+    func start() {
+        guard link == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+    }
+
+    @objc private func tick() {
+        onTick?()
     }
 }

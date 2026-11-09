@@ -149,6 +149,41 @@ void main() {
     expect(tuned.height, 720);
     expect(tuned.bitrateMbps, 8);
     expect(tuneForLatency(false).height, 1080);
+    expect(
+      decideFrameSend(
+        smooth: true,
+        pendingSends: 2,
+        keyframe: false,
+        dropUntilKeyframe: false,
+      ).send,
+      isTrue,
+    );
+    final blocked = decideFrameSend(
+      smooth: true,
+      pendingSends: 3,
+      keyframe: false,
+      dropUntilKeyframe: false,
+    );
+    expect(blocked.send, isFalse);
+    expect(blocked.requestKeyframe, isTrue);
+    expect(
+      decideFrameSend(
+        smooth: false,
+        pendingSends: 1,
+        keyframe: false,
+        dropUntilKeyframe: false,
+      ).send,
+      isFalse,
+    );
+    expect(
+      decideFrameSend(
+        smooth: true,
+        pendingSends: 0,
+        keyframe: true,
+        dropUntilKeyframe: true,
+      ).send,
+      isTrue,
+    );
     expect(normalizeStreamHeight(480), 720);
     expect(normalizeStreamHeight(1080), 1080);
   });

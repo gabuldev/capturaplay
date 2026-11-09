@@ -35,6 +35,7 @@ final class LanSender: NSObject, CaptureMediaSink {
     private(set) var requestedHeight = 720
     var bitrate = 8_000_000
     var lowLatency = true
+    private var smoothPlayback = true
 
     var wantsVideoSamples: Bool { true }
     // Audio stays on AVCaptureAudioPreviewOutput. Adding an audio data output
@@ -44,12 +45,16 @@ final class LanSender: NSObject, CaptureMediaSink {
 
     func consumeAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {}
 
-    func update(bitrateMbps: Int, height: Int, lowLatency: Bool) {
+    func update(bitrateMbps: Int, height: Int, lowLatency: Bool, smooth: Bool) {
         let cappedHeight = height <= 720 ? 720 : 1080
         let cappedBitrate = min(max(bitrateMbps, 6), 20) * 1_000_000
+        stateLock.lock()
+        let smoothChanged = smoothPlayback != smooth
+        smoothPlayback = smooth
+        stateLock.unlock()
         encodeQueue.async {
             let sizeChanged = self.requestedHeight != cappedHeight
-            let modeChanged = self.lowLatency != lowLatency
+            let modeChanged = self.lowLatency != lowLatency || smoothChanged
             self.requestedHeight = cappedHeight
             self.bitrate = cappedBitrate
             self.lowLatency = lowLatency
@@ -111,7 +116,8 @@ final class LanSender: NSObject, CaptureMediaSink {
         let received = CACurrentMediaTime()
         let captureHostUs = Self.hostUs()
         stateLock.lock()
-        let busy = inFlight >= 1
+        let encodeLimit = smoothPlayback ? 2 : 1
+        let busy = inFlight >= encodeLimit
         if !busy { inFlight += 1 }
         stateLock.unlock()
         guard !busy else {
@@ -203,12 +209,13 @@ final class LanSender: NSObject, CaptureMediaSink {
         }
         let bitrate = self.bitrate
         let lowLatency = self.lowLatency
-        let interval: Int = lowLatency ? 15 : 60
+        let smooth = self.isSmooth()
+        let interval: Int = smooth ? 60 : (lowLatency ? 15 : 60)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: interval as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: (lowLatency ? 0.25 : 1.0) as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: (smooth ? 1.0 : 0.25) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
         let delayStatus = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
@@ -344,6 +351,12 @@ final class LanSender: NSObject, CaptureMediaSink {
         return (max(2, width & ~1), capHeight)
     }
 
+    private func isSmooth() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return smoothPlayback
+    }
+
     private func requestKeyframe() {
         stateLock.lock()
         needKeyframe = true
@@ -462,8 +475,13 @@ final class LanSender: NSObject, CaptureMediaSink {
         networkQueue.async {
             guard let connection = self.connection else { return }
             if !important {
-                if self.pendingSends > 0 || (self.dropUntilKeyframe && !isKeyframe) {
+                let limit = self.isSmooth() ? 3 : 1
+                if self.pendingSends >= limit {
                     self.dropUntilKeyframe = true
+                    self.requestKeyframe()
+                    return
+                }
+                if self.dropUntilKeyframe && !isKeyframe {
                     self.requestKeyframe()
                     return
                 }
