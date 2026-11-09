@@ -308,10 +308,6 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
             }
         }
 
-        if session.canSetSessionPreset(.inputPriority) {
-            session.sessionPreset = .inputPriority
-        }
-        session.automaticallyConfiguresCaptureDeviceForWideColor = false
 
         for input in session.inputs {
             session.removeInput(input)
