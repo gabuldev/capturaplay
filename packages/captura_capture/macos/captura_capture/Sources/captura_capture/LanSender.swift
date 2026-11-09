@@ -51,7 +51,7 @@ final class LanSender: NSObject, CaptureMediaSink {
             if sizeChanged {
                 self.invalidateEncoderLocked()
             } else if let session = self.compression {
-                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: self.bitrate as CFNumber)
             }
         }
     }
