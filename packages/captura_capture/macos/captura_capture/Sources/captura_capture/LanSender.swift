@@ -32,8 +32,9 @@ final class LanSender: NSObject, CaptureMediaSink {
     private var cachedConfig: Data?
     private var listening = false
 
-    private(set) var requestedHeight = 720
-    var bitrate = 8_000_000
+    private(set) var requestedHeight = 1080
+    var bitrate = 20_000_000
+    private var maxFrameQP = 32
     var lowLatency = true
     private var smoothPlayback = true
 
@@ -47,7 +48,7 @@ final class LanSender: NSObject, CaptureMediaSink {
 
     func update(bitrateMbps: Int, height: Int, lowLatency: Bool, smooth: Bool) {
         let cappedHeight = height <= 720 ? 720 : 1080
-        let cappedBitrate = min(max(bitrateMbps, 6), 20) * 1_000_000
+        let cappedBitrate = min(max(bitrateMbps, 10), 30) * 1_000_000
         stateLock.lock()
         let smoothChanged = smoothPlayback != smooth
         smoothPlayback = smooth
@@ -208,29 +209,31 @@ final class LanSender: NSObject, CaptureMediaSink {
             return false
         }
         let bitrate = self.bitrate
-        let lowLatency = self.lowLatency
         let smooth = self.isSmooth()
-        let interval: Int = smooth ? 60 : (lowLatency ? 15 : 60)
+        let interval = smooth ? 120 : 30
+        let profile = smooth
+            ? kVTProfileLevel_H264_High_AutoLevel
+            : kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel)
+        let profileStatus = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: profile)
+        if profileStatus != noErr {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: interval as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: (smooth ? 1.0 : 0.25) as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: (smooth ? 2.0 : 0.5) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        let maxQP = smooth ? 32 : 38
+        self.maxFrameQP = maxQP
+        if #available(macOS 13.0, *) {
+            _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: maxQP as CFNumber)
+        }
         let delayStatus = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         if delayStatus != noErr {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber)
         }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
-        if !lowLatency {
-            let bytesPerSecond = max(bitrate / 8, 1)
-            VTSessionSetProperty(
-                session,
-                key: kVTCompressionPropertyKey_DataRateLimits,
-                value: [bytesPerSecond, 1] as CFArray
-            )
-        }
         VTCompressionSessionPrepareToEncodeFrames(session)
         compression = session
         sessionWidth = width
@@ -319,7 +322,9 @@ final class LanSender: NSObject, CaptureMediaSink {
             height: Int(dimensions.height),
             fpsMilli: 60000,
             sps: sps,
-            pps: pps
+            pps: pps,
+            bitrateMbps: max(1, self.bitrate / 1_000_000),
+            maxFrameQp: self.maxFrameQP
         )
     }
 

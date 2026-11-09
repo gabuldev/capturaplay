@@ -153,6 +153,8 @@ class LanVideoConfig {
     required this.fpsMilli,
     required this.sps,
     required this.pps,
+    this.bitrateMbps = 0,
+    this.maxFrameQp = 0,
   });
 
   static const codecH264 = 1;
@@ -163,9 +165,12 @@ class LanVideoConfig {
   final int fpsMilli;
   final Uint8List sps;
   final Uint8List pps;
+  final int bitrateMbps;
+  final int maxFrameQp;
 
   Uint8List encode() {
-    final out = Uint8List(14 + sps.length + pps.length);
+    final extra = bitrateMbps > 0 ? 8 : 0;
+    final out = Uint8List(14 + sps.length + pps.length + extra);
     final view = ByteData.sublistView(out);
     view.setUint8(0, codecH264);
     view.setUint8(1, nalLengthSize);
@@ -176,7 +181,12 @@ class LanVideoConfig {
     out.setRange(12, 12 + sps.length, sps);
     final ppsAt = 12 + sps.length;
     ByteData.sublistView(out).setUint16(ppsAt, pps.length, Endian.big);
-    out.setRange(ppsAt + 2, out.length, pps);
+    out.setRange(ppsAt + 2, ppsAt + 2 + pps.length, pps);
+    if (bitrateMbps > 0) {
+      final tail = ppsAt + 2 + pps.length;
+      ByteData.sublistView(out).setUint32(tail, bitrateMbps, Endian.big);
+      ByteData.sublistView(out).setUint32(tail + 4, maxFrameQp, Endian.big);
+    }
     return out;
   }
 
@@ -200,12 +210,19 @@ class LanVideoConfig {
     final ppsEnd = spsEnd + 2 + ppsLength;
     if (payload.length < ppsEnd) throw const LanDecodeException('pps');
     final pps = Uint8List.sublistView(payload, spsEnd + 2, ppsEnd);
+    final viewTail = ByteData.sublistView(payload);
     return LanVideoConfig(
       width: width,
       height: height,
       fpsMilli: fpsMilli,
       sps: sps,
       pps: pps,
+      bitrateMbps: payload.length >= ppsEnd + 4
+          ? viewTail.getUint32(ppsEnd, Endian.big)
+          : 0,
+      maxFrameQp: payload.length >= ppsEnd + 8
+          ? viewTail.getUint32(ppsEnd + 4, Endian.big)
+          : 0,
     );
   }
 }
@@ -378,7 +395,7 @@ int glassLatencyUs({
   return displayReceiverUs + offsetUs - captureSenderUs;
 }
 
-int clampStreamBitrateMbps(int value) => value.clamp(6, 20);
+int clampStreamBitrateMbps(int value) => value.clamp(10, 30);
 
 /// How many encoded frames may be waiting on the socket.
 ///
@@ -442,9 +459,9 @@ class StreamTune {
 
 StreamTune tuneForLatency(bool lowLatency) {
   if (lowLatency) {
-    return const StreamTune(lowLatency: true, height: 720, bitrateMbps: 8);
+    return const StreamTune(lowLatency: true, height: 720, bitrateMbps: 15);
   }
-  return const StreamTune(lowLatency: false, height: 1080, bitrateMbps: 14);
+  return const StreamTune(lowLatency: false, height: 1080, bitrateMbps: 20);
 }
 
 int normalizeStreamHeight(int height) => height <= 720 ? 720 : 1080;

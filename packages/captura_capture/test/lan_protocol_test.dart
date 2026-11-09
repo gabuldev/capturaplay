@@ -63,7 +63,26 @@ void main() {
     expect(decoded.fpsMilli, 59940);
     expect(decoded.sps, config.sps);
     expect(decoded.pps, config.pps);
+    expect(decoded.bitrateMbps, 0);
+    expect(decoded.maxFrameQp, 0);
     expect(LanVideoFrame.decode(messages.last.payload).keyframe, isFalse);
+  });
+
+  test('configuração H.264 carrega taxa e teto de QP', () {
+    final config = LanVideoConfig(
+      width: 1280,
+      height: 720,
+      fpsMilli: 60000,
+      sps: Uint8List.fromList([0x67]),
+      pps: Uint8List.fromList([0x68]),
+      bitrateMbps: 20,
+      maxFrameQp: 32,
+    );
+    final decoded = LanVideoConfig.decode(config.encode());
+    expect(decoded.bitrateMbps, 20);
+    expect(decoded.maxFrameQp, 32);
+    expect(decoded.sps, config.sps);
+    expect(decoded.pps, config.pps);
   });
 
   test('magic, versão e tamanho inválidos derrubam o parser', () {
@@ -126,8 +145,9 @@ void main() {
     expect(parseManualEndpoint('fe80::1')?.host, 'fe80::1');
     expect(parseManualEndpoint('[fe80::1]:9')?.port, 9);
     expect(parseManualEndpoint('  '), isNull);
-    expect(clampStreamBitrateMbps(4), 6);
-    expect(clampStreamBitrateMbps(30), 20);
+    expect(clampStreamBitrateMbps(4), 10);
+    expect(clampStreamBitrateMbps(30), 30);
+    expect(clampStreamBitrateMbps(40), 30);
     expect(
       clockOffsetUs(
         clientSendUs: 1000,
@@ -147,7 +167,7 @@ void main() {
     );
     final tuned = tuneForLatency(true);
     expect(tuned.height, 720);
-    expect(tuned.bitrateMbps, 8);
+    expect(tuned.bitrateMbps, 15);
     expect(tuneForLatency(false).height, 1080);
     expect(
       decideFrameSend(

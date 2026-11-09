@@ -133,14 +133,14 @@ void main() {
 
     await controller.toggleStreaming();
     expect(controller.streaming, isTrue);
-    expect(client.calls, contains('setStreaming:true:8:720:true:true'));
+    expect(client.calls, contains('setStreaming:true:20:1080:true:true'));
     expect(client.starts, hasLength(startsBefore));
 
     await controller.chooseLatencyMode(false);
     expect(controller.lowLatency, isFalse);
     expect(controller.streamHeight, 1080);
-    expect(controller.streamBitrateMbps, 14);
-    expect(client.calls.last, 'setStreaming:true:14:1080:false:true');
+    expect(controller.streamBitrateMbps, 20);
+    expect(client.calls.last, 'setStreaming:true:20:1080:false:true');
     controller.dispose();
   });
 

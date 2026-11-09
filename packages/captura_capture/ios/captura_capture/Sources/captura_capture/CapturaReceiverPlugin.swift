@@ -138,7 +138,8 @@ final class ReceiverHub {
     private let stateLock = NSLock()
     private var smoothPlayback = true
     private var jitter: [HeldFrame] = []
-    private var lastPresent = CFTimeInterval(0)
+    private var paceAnchorLocal: CFTimeInterval?
+    private var paceAnchorPtsUs: UInt64?
     private let pacer = DisplayPacer()
     private var clockOffsetUs: Int64 = 0
     private var receivedTimes: [CFTimeInterval] = []
@@ -147,6 +148,11 @@ final class ReceiverHub {
     private var lastSequence: UInt16?
     private var networkDrops = 0
     private var displayDrops = 0
+    private var decoderErrors = 0
+    private var waitingForKeyframe = 0
+    private var awaitingKeyframe = false
+    private var configuredBitrateMbps = 0
+    private var configuredMaxQp = 0
     private var lastLatencyMs = 0.0
 
     func start() {
@@ -169,9 +175,9 @@ final class ReceiverHub {
     func setSmooth(_ value: Bool) {
         stateLock.lock()
         smoothPlayback = value
-        if !value {
-            jitter.removeAll()
-        }
+        jitter.removeAll()
+        paceAnchorLocal = nil
+        paceAnchorPtsUs = nil
         stateLock.unlock()
     }
 
@@ -186,6 +192,8 @@ final class ReceiverHub {
             self.pingTimer = nil
             self.stateLock.lock()
             self.jitter.removeAll()
+            self.paceAnchorLocal = nil
+            self.paceAnchorPtsUs = nil
             self.stateLock.unlock()
         }
         pacer.stop()
@@ -384,6 +392,12 @@ final class ReceiverHub {
                 }
                 if status == noErr {
                     format = description
+                    if let mbps = LanWire.configBitrateMbps(of: payload) {
+                        self.configuredBitrateMbps = mbps
+                    }
+                    if let qp = LanWire.configMaxFrameQp(of: payload) {
+                        self.configuredMaxQp = qp
+                    }
                 }
             }
         }
@@ -434,10 +448,26 @@ final class ReceiverHub {
         }
         noteSequence(prefix.sequence)
         noteReceived()
+        let recover = awaitingKeyframe && prefix.keyframe
+        if awaitingKeyframe && !prefix.keyframe {
+            waitingForKeyframe += 1
+            emitStats(bufferDepth: bufferDepth())
+            return
+        }
+        if recover {
+            awaitingKeyframe = false
+        }
         if isSmooth() {
-            hold(sample, keyframe: prefix.keyframe, captureHostUs: prefix.captureHostUs, sequence: prefix.sequence)
+            hold(
+                sample,
+                keyframe: prefix.keyframe,
+                captureHostUs: prefix.captureHostUs,
+                sequence: prefix.sequence,
+                ptsUs: prefix.ptsUs,
+                flushBefore: recover
+            )
         } else {
-            present(sample, keyframe: prefix.keyframe, captureHostUs: prefix.captureHostUs)
+            present(sample, keyframe: prefix.keyframe, captureHostUs: prefix.captureHostUs, flushBefore: recover)
         }
     }
 
@@ -460,16 +490,25 @@ final class ReceiverHub {
         )
     }
 
-    private func present(_ sample: CMSampleBuffer, keyframe: Bool, captureHostUs: UInt64) {
+    private func present(_ sample: CMSampleBuffer, keyframe: Bool, captureHostUs: UInt64, flushBefore: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let displayedAt = Self.nowUs()
             var enqueued = false
             if let layer = self.display?.sampleLayer {
-                if layer.status == .failed || keyframe {
+                if layer.status == .failed {
+                    layer.flush()
+                    self.queue.async { self.decoderErrors += 1 }
+                } else if flushBefore {
                     layer.flush()
                 }
-                if keyframe || layer.isReadyForMoreMediaData {
+                let failed = layer.status == .failed
+                if failed && !keyframe {
+                    enqueued = false
+                } else if layer.isReadyForMoreMediaData || keyframe {
+                    if !layer.isReadyForMoreMediaData {
+                        layer.flush()
+                    }
                     layer.enqueue(sample)
                     enqueued = true
                 }
@@ -477,8 +516,13 @@ final class ReceiverHub {
             self.queue.async {
                 if enqueued {
                     self.noteDisplayed(captureHostUs: captureHostUs, displayedAt: displayedAt)
+                } else if keyframe {
+                    self.displayDrops += 1
+                    self.emitStats(bufferDepth: 0)
                 } else {
                     self.displayDrops += 1
+                    self.awaitingKeyframe = true
+                    self.waitingForKeyframe += 1
                     self.emitStats(bufferDepth: 0)
                 }
             }
@@ -490,6 +534,7 @@ final class ReceiverHub {
             let gap = Int(sequence &- lastSequence)
             if gap > 1 && gap < 240 {
                 networkDrops += gap - 1
+                awaitingKeyframe = true
             }
         }
         lastSequence = sequence
@@ -525,23 +570,40 @@ final class ReceiverHub {
         return jitter.count
     }
 
-    private func hold(_ sample: CMSampleBuffer, keyframe: Bool, captureHostUs: UInt64, sequence: UInt16) {
-        let frame = HeldFrame(sample: sample, keyframe: keyframe, captureHostUs: captureHostUs, sequence: sequence)
+    private func hold(
+        _ sample: CMSampleBuffer,
+        keyframe: Bool,
+        captureHostUs: UInt64,
+        sequence: UInt16,
+        ptsUs: UInt64,
+        flushBefore: Bool
+    ) {
+        let frame = HeldFrame(
+            sample: sample,
+            keyframe: keyframe,
+            captureHostUs: captureHostUs,
+            sequence: sequence,
+            ptsUs: ptsUs,
+            flushBefore: flushBefore
+        )
         stateLock.lock()
         jitter.append(frame)
-        while jitter.count > 3 {
-            jitter.removeFirst()
-            displayDrops += 1
-            while let next = jitter.first, !next.keyframe {
-                jitter.removeFirst()
-                displayDrops += 1
-            }
+        if jitter.count > 30 {
+            let removed = jitter.count
+            jitter.removeAll()
+            displayDrops += removed
+            awaitingKeyframe = true
+            paceAnchorLocal = nil
+            paceAnchorPtsUs = nil
         }
         let depth = jitter.count
         stateLock.unlock()
         emitStats(bufferDepth: depth)
     }
 
+    /// Release every frame whose source PTS is due. 59.94 and 60 share this
+    /// clock, so a fixed 16.7 ms gate is not used: that gate, plus dropping a
+    /// frame when the layer was busy, was presenting ~7 fps fewer than arrived.
     private func pace() {
         let now = CACurrentMediaTime()
         stateLock.lock()
@@ -549,36 +611,90 @@ final class ReceiverHub {
             stateLock.unlock()
             return
         }
-        let due = now - lastPresent >= 0.014
-        let ahead = jitter.count > 1
-        guard !jitter.isEmpty, due || ahead else {
-            stateLock.unlock()
-            return
+        var batch: [HeldFrame] = []
+        while let frame = jitter.first {
+            let due = dueTimeLocked(now: now, frame: frame)
+            if now + 0.002 < due {
+                break
+            }
+            batch.append(jitter.removeFirst())
         }
-        let frame = jitter.removeFirst()
-        let depth = jitter.count
         stateLock.unlock()
-        lastPresent = now
-        show(frame, bufferDepth: depth)
+        guard !batch.isEmpty else { return }
+        var pending = batch
+        while !pending.isEmpty {
+            switch presentHeld(pending[0]) {
+            case .shown:
+                pending.removeFirst()
+            case .skipped:
+                pending.removeFirst()
+                var droppedDependents = 1
+                while !pending.isEmpty && !pending[0].keyframe {
+                    pending.removeFirst()
+                    droppedDependents += 1
+                }
+                stateLock.lock()
+                while let next = jitter.first, !next.keyframe {
+                    jitter.removeFirst()
+                    droppedDependents += 1
+                }
+                let recovered = pending.contains { $0.keyframe } || jitter.contains { $0.keyframe }
+                let depth = jitter.count
+                stateLock.unlock()
+                let lost = droppedDependents
+                queue.async {
+                    self.waitingForKeyframe += lost
+                    if !recovered {
+                        self.awaitingKeyframe = true
+                    }
+                    self.emitStats(bufferDepth: depth)
+                }
+            case .notReady:
+                stateLock.lock()
+                jitter.insert(contentsOf: pending, at: 0)
+                stateLock.unlock()
+                return
+            }
+        }
     }
 
-    private func show(_ frame: HeldFrame, bufferDepth: Int) {
-        guard let layer = display?.sampleLayer else { return }
+    private func dueTimeLocked(now: CFTimeInterval, frame: HeldFrame) -> CFTimeInterval {
+        if let anchorLocal = paceAnchorLocal, let anchorPts = paceAnchorPtsUs {
+            let delta = Double(Int64(bitPattern: frame.ptsUs) - Int64(bitPattern: anchorPts)) / 1_000_000.0
+            if delta < -0.5 || delta > 5 {
+                paceAnchorLocal = now
+                paceAnchorPtsUs = frame.ptsUs
+                return now
+            }
+            return anchorLocal + delta
+        }
+        paceAnchorLocal = now
+        paceAnchorPtsUs = frame.ptsUs
+        return now
+    }
+
+    private enum PresentResult {
+        case shown
+        case skipped
+        case notReady
+    }
+
+    private func presentHeld(_ frame: HeldFrame) -> PresentResult {
+        guard let layer = display?.sampleLayer else { return .notReady }
         if layer.status == .failed {
             layer.flush()
+            queue.async { self.decoderErrors += 1 }
+            guard frame.keyframe else { return .skipped }
+        } else if frame.flushBefore {
+            layer.flush()
         }
-        if layer.isReadyForMoreMediaData {
-            layer.enqueue(frame.sample)
-            let displayedAt = Self.nowUs()
-            queue.async {
-                self.noteDisplayed(captureHostUs: frame.captureHostUs, displayedAt: displayedAt)
-            }
-        } else {
-            queue.async {
-                self.displayDrops += 1
-                self.emitStats(bufferDepth: bufferDepth)
-            }
+        guard layer.isReadyForMoreMediaData else { return .notReady }
+        layer.enqueue(frame.sample)
+        let displayedAt = Self.nowUs()
+        queue.async {
+            self.noteDisplayed(captureHostUs: frame.captureHostUs, displayedAt: displayedAt)
         }
+        return .shown
     }
 
     private func emitStats(bufferDepth: Int) {
@@ -593,6 +709,10 @@ final class ReceiverHub {
             "dropped": networkDrops,
             "receiverDrops": displayDrops,
             "bufferDepth": bufferDepth,
+            "decoderErrors": decoderErrors,
+            "waitingKeyframe": waitingForKeyframe,
+            "bitrateMbps": configuredBitrateMbps,
+            "maxFrameQp": configuredMaxQp,
         ])
     }
 
@@ -643,6 +763,8 @@ private struct HeldFrame {
     let keyframe: Bool
     let captureHostUs: UInt64
     let sequence: UInt16
+    let ptsUs: UInt64
+    let flushBefore: Bool
 }
 
 private final class DisplayPacer: NSObject {
@@ -652,7 +774,10 @@ private final class DisplayPacer: NSObject {
     func start() {
         guard link == nil else { return }
         let link = CADisplayLink(target: self, selector: #selector(tick))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
+        // Poll at the panel rate, up to 120 Hz. A preferred 60 with a floor of
+        // 30 let ProMotion drift under the 59.94 source and the pacer then
+        // discarded the frames it could not show on that tick.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         self.link = link
     }

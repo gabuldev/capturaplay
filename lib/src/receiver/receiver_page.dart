@@ -68,6 +68,10 @@ class ReceiverController extends ChangeNotifier {
   int droppedFrames = 0;
   int receiverDrops = 0;
   int bufferDepth = 0;
+  int decoderErrors = 0;
+  int waitingKeyframe = 0;
+  int bitrateMbps = 0;
+  int maxFrameQp = 0;
   bool showStats = false;
   bool smooth = true;
   bool chrome = true;
@@ -93,6 +97,10 @@ class ReceiverController extends ChangeNotifier {
           droppedFrames = 0;
           receiverDrops = 0;
           bufferDepth = 0;
+          decoderErrors = 0;
+          waitingKeyframe = 0;
+          bitrateMbps = 0;
+          maxFrameQp = 0;
         }
       case ReceiverStatsChanged(
         :final fps,
@@ -101,6 +109,10 @@ class ReceiverController extends ChangeNotifier {
         :final dropped,
         :final receiverDrops,
         :final bufferDepth,
+        :final decoderErrors,
+        :final waitingKeyframe,
+        :final bitrateMbps,
+        :final maxFrameQp,
       ):
         this.fps = fps;
         this.displayedFps = displayedFps;
@@ -108,6 +120,10 @@ class ReceiverController extends ChangeNotifier {
         droppedFrames = dropped;
         this.receiverDrops = receiverDrops;
         this.bufferDepth = bufferDepth;
+        this.decoderErrors = decoderErrors;
+        this.waitingKeyframe = waitingKeyframe;
+        this.bitrateMbps = bitrateMbps;
+        this.maxFrameQp = maxFrameQp;
     }
     notifyListeners();
   }
@@ -196,6 +212,10 @@ class _ReceiverPageState extends State<ReceiverPage> {
                     dropped: controller.droppedFrames,
                     receiverDrops: controller.receiverDrops,
                     bufferDepth: controller.bufferDepth,
+                    decoderErrors: controller.decoderErrors,
+                    waitingKeyframe: controller.waitingKeyframe,
+                    bitrateMbps: controller.bitrateMbps,
+                    maxFrameQp: controller.maxFrameQp,
                   ),
                 ),
             ],
@@ -380,6 +400,10 @@ class _Stats extends StatelessWidget {
     required this.dropped,
     required this.receiverDrops,
     required this.bufferDepth,
+    required this.decoderErrors,
+    required this.waitingKeyframe,
+    required this.bitrateMbps,
+    required this.maxFrameQp,
   });
 
   final double? fps;
@@ -388,6 +412,10 @@ class _Stats extends StatelessWidget {
   final int dropped;
   final int receiverDrops;
   final int bufferDepth;
+  final int decoderErrors;
+  final int waitingKeyframe;
+  final int bitrateMbps;
+  final int maxFrameQp;
 
   @override
   Widget build(BuildContext context) {
@@ -425,6 +453,18 @@ class _Stats extends StatelessWidget {
             ),
             Text(
               'rede $dropped · tela $receiverDrops · buffer $bufferDepth',
+              style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
+            ),
+            Text(
+              'decoder $decoderErrors · espera IDR $waitingKeyframe',
+              style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
+            ),
+            Text(
+              bitrateMbps > 0
+                  ? (maxFrameQp > 0
+                        ? '$bitrateMbps Mb/s · QP ≤ $maxFrameQp'
+                        : '$bitrateMbps Mb/s')
+                  : 'taxa do encoder indisponível',
               style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
             ),
             const Text(

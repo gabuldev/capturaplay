@@ -31,8 +31,8 @@ class StudioController extends ChangeNotifier {
   CaptureStats? stats;
   bool fullscreen = false;
   bool streaming = false;
-  int streamBitrateMbps = 8;
-  int streamHeight = 720;
+  int streamBitrateMbps = 20;
+  int streamHeight = 1080;
   bool lowLatency = true;
   bool smoothPlayback = true;
   int streamClients = 0;
@@ -131,6 +131,12 @@ class StudioController extends ChangeNotifier {
 
   Future<void> commitStreamBitrate() => _pushStreaming();
 
+  Future<void> chooseStreamBitrate(int mbps) async {
+    streamBitrateMbps = clampStreamBitrateMbps(mbps);
+    await _pushStreaming();
+    notifyListeners();
+  }
+
   Future<void> chooseStreamHeight(int height) async {
     streamHeight = normalizeStreamHeight(height);
     await _pushStreaming();
@@ -198,7 +204,7 @@ class StudioController extends ChangeNotifier {
   Future<void> _release() async {
     try {
       await client.setStreaming(
-        const StreamingRequest(enabled: false, bitrateMbps: 8, height: 720),
+        const StreamingRequest(enabled: false, bitrateMbps: 20, height: 1080),
       );
       await client.setCursorHidden(false);
       await client.stop();

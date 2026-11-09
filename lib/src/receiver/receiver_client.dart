@@ -33,6 +33,10 @@ class ReceiverStatsChanged extends ReceiverEvent {
     this.dropped = 0,
     this.receiverDrops = 0,
     this.bufferDepth = 0,
+    this.decoderErrors = 0,
+    this.waitingKeyframe = 0,
+    this.bitrateMbps = 0,
+    this.maxFrameQp = 0,
   });
 
   final double fps;
@@ -41,6 +45,10 @@ class ReceiverStatsChanged extends ReceiverEvent {
   final int dropped;
   final int receiverDrops;
   final int bufferDepth;
+  final int decoderErrors;
+  final int waitingKeyframe;
+  final int bitrateMbps;
+  final int maxFrameQp;
 }
 
 abstract class ReceiverClient {
@@ -132,6 +140,10 @@ ReceiverEvent? _decode(Object? raw) {
       final dropped = map['dropped'];
       final receiverDrops = map['receiverDrops'];
       final bufferDepth = map['bufferDepth'];
+      final decoderErrors = map['decoderErrors'];
+      final waitingKeyframe = map['waitingKeyframe'];
+      final bitrateMbps = map['bitrateMbps'];
+      final maxFrameQp = map['maxFrameQp'];
       return ReceiverStatsChanged(
         fps: fps is num ? fps.toDouble() : 0,
         displayedFps: displayed is num ? displayed.toDouble() : null,
@@ -139,6 +151,10 @@ ReceiverEvent? _decode(Object? raw) {
         dropped: dropped is num ? dropped.toInt() : 0,
         receiverDrops: receiverDrops is num ? receiverDrops.toInt() : 0,
         bufferDepth: bufferDepth is num ? bufferDepth.toInt() : 0,
+        decoderErrors: decoderErrors is num ? decoderErrors.toInt() : 0,
+        waitingKeyframe: waitingKeyframe is num ? waitingKeyframe.toInt() : 0,
+        bitrateMbps: bitrateMbps is num ? bitrateMbps.toInt() : 0,
+        maxFrameQp: maxFrameQp is num ? maxFrameQp.toInt() : 0,
       );
     default:
       return null;

@@ -178,17 +178,20 @@ class ControlBar extends StatelessWidget {
                     onSelected: (id) =>
                         controller.chooseStreamHeight(id == '720' ? 720 : 1080),
                   ),
-                  SizedBox(
-                    width: 180,
-                    child: Slider(
-                      min: 6,
-                      max: 20,
-                      divisions: 14,
-                      value: controller.streamBitrateMbps.toDouble(),
-                      label: '${controller.streamBitrateMbps} Mb/s',
-                      onChanged: controller.previewStreamBitrate,
-                      onChangeEnd: (_) => controller.commitStreamBitrate(),
-                    ),
+                  FieldMenu(
+                    label: 'Qualidade',
+                    value: '${controller.streamBitrateMbps} Mb/s',
+                    enabled: true,
+                    entries: [
+                      for (final mbps in [10, 20, 30])
+                        MenuEntry(
+                          id: '$mbps',
+                          label: '$mbps Mb/s',
+                          selected: controller.streamBitrateMbps == mbps,
+                        ),
+                    ],
+                    onSelected: (id) =>
+                        controller.chooseStreamBitrate(int.tryParse(id) ?? 20),
                   ),
                   Text(
                     controller.streamStatusLabel,

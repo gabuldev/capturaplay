@@ -72,7 +72,7 @@ enum LanWire {
         return encode(LanMessage(type: LanType.helloAck, flags: 0, payload: payload))
     }
 
-    static func videoConfig(width: Int, height: Int, fpsMilli: Int, sps: Data, pps: Data) -> Data {
+    static func videoConfig(width: Int, height: Int, fpsMilli: Int, sps: Data, pps: Data, bitrateMbps: Int = 0, maxFrameQp: Int = 0) -> Data {
         var payload = Data()
         payload.append(1)
         payload.append(4)
@@ -83,6 +83,10 @@ enum LanWire {
         payload.append(sps)
         payload.appendU16(UInt16(pps.count))
         payload.append(pps)
+        if bitrateMbps > 0 {
+            payload.appendU32(UInt32(bitrateMbps))
+            payload.appendU32(UInt32(max(0, maxFrameQp)))
+        }
         return encode(LanMessage(type: LanType.videoConfig, flags: 0, payload: payload))
     }
 
@@ -152,6 +156,20 @@ enum LanWire {
         guard payload.count >= ppsEnd else { return nil }
         let pps = payload.subdata(in: (spsEnd + 2)..<ppsEnd)
         return (width, height, fpsMilli, sps, pps)
+    }
+
+    static func configBitrateMbps(of payload: Data) -> Int? {
+        guard let sets = parameterSets(of: payload) else { return nil }
+        let end = 12 + sets.sps.count + 2 + sets.pps.count
+        guard payload.count >= end + 4 else { return nil }
+        return Int(payload.u32(end))
+    }
+
+    static func configMaxFrameQp(of payload: Data) -> Int? {
+        guard let sets = parameterSets(of: payload) else { return nil }
+        let end = 12 + sets.sps.count + 2 + sets.pps.count
+        guard payload.count >= end + 8 else { return nil }
+        return Int(payload.u32(end + 4))
     }
 
     static func pingTime(of payload: Data) -> UInt64? {
