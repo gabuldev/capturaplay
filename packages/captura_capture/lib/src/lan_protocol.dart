@@ -1,0 +1,382 @@
+import 'dart:typed_data';
+
+/// Byte layout shared by the Mac sender and the iPhone receiver.
+///
+/// The hot path is implemented again in Swift (`LanWire.swift`) because
+/// frames must not cross a method channel. These types are the spec: the
+/// Dart tests lock the bytes, and the Swift code has to match them.
+///
+/// ```
+/// offset  size  field
+/// 0       4     magic "CPL1"
+/// 4       1     version (1)
+/// 5       1     type
+/// 6       2     flags (big-endian)
+/// 8       4     payload length (big-endian)
+/// 12      n     payload
+/// ```
+///
+/// [LanType.input] is reserved for a later controller. Nothing sends it yet.
+abstract final class LanType {
+  static const hello = 1;
+  static const helloAck = 2;
+  static const videoConfig = 0x10;
+  static const videoFrame = 0x11;
+  static const audioConfig = 0x20;
+  static const audioFrame = 0x21;
+  static const input = 0x30;
+  static const ping = 0x40;
+  static const pong = 0x41;
+  static const bye = 0x7F;
+}
+
+abstract final class LanLimits {
+  static const version = 1;
+  static const headerSize = 12;
+  static const maxPayload = 4000000;
+  static const port = 47731;
+  static const serviceType = '_capturaplay._tcp';
+  static const magic = [0x43, 0x50, 0x4C, 0x31];
+}
+
+abstract final class LanFeatures {
+  static const video = 1;
+  static const audio = 2;
+  static const input = 4;
+}
+
+class LanDecodeException implements Exception {
+  const LanDecodeException(this.reason);
+
+  final String reason;
+
+  @override
+  String toString() => 'LanDecodeException($reason)';
+}
+
+class LanMessage {
+  const LanMessage({required this.type, this.flags = 0, required this.payload});
+
+  final int type;
+  final int flags;
+  final Uint8List payload;
+}
+
+class LanFramer {
+  static Uint8List encode(LanMessage message) {
+    if (message.payload.length > LanLimits.maxPayload) {
+      throw const LanDecodeException('length');
+    }
+    final out = Uint8List(LanLimits.headerSize + message.payload.length);
+    final data = ByteData.sublistView(out);
+    out[0] = LanLimits.magic[0];
+    out[1] = LanLimits.magic[1];
+    out[2] = LanLimits.magic[2];
+    out[3] = LanLimits.magic[3];
+    data.setUint8(4, LanLimits.version);
+    data.setUint8(5, message.type);
+    data.setUint16(6, message.flags, Endian.big);
+    data.setUint32(8, message.payload.length, Endian.big);
+    out.setRange(LanLimits.headerSize, out.length, message.payload);
+    return out;
+  }
+}
+
+/// Incremental TCP deframer. Incomplete headers stay buffered.
+class LanParser {
+  final List<int> _pending = [];
+
+  List<LanMessage> add(List<int> chunk) {
+    _pending.addAll(chunk);
+    final messages = <LanMessage>[];
+    while (_pending.length >= LanLimits.headerSize) {
+      for (var i = 0; i < 4; i++) {
+        if (_pending[i] != LanLimits.magic[i]) {
+          throw const LanDecodeException('magic');
+        }
+      }
+      final header = Uint8List.fromList(
+        _pending.sublist(0, LanLimits.headerSize),
+      );
+      final view = ByteData.sublistView(header);
+      final version = view.getUint8(4);
+      if (version != LanLimits.version) {
+        throw const LanDecodeException('version');
+      }
+      final type = view.getUint8(5);
+      final flags = view.getUint16(6, Endian.big);
+      final length = view.getUint32(8, Endian.big);
+      if (length > LanLimits.maxPayload) {
+        throw const LanDecodeException('length');
+      }
+      final total = LanLimits.headerSize + length;
+      if (_pending.length < total) break;
+      final payload = Uint8List.fromList(
+        _pending.sublist(LanLimits.headerSize, total),
+      );
+      _pending.removeRange(0, total);
+      messages.add(LanMessage(type: type, flags: flags, payload: payload));
+    }
+    return messages;
+  }
+
+  void reset() => _pending.clear();
+}
+
+class LanHello {
+  const LanHello({required this.features});
+
+  final int features;
+
+  Uint8List encode() {
+    final out = Uint8List(3);
+    final view = ByteData.sublistView(out);
+    view.setUint8(0, LanLimits.version);
+    view.setUint16(1, features, Endian.big);
+    return out;
+  }
+
+  static LanHello decode(Uint8List payload) {
+    if (payload.length < 3) throw const LanDecodeException('hello');
+    final view = ByteData.sublistView(payload);
+    if (view.getUint8(0) != LanLimits.version) {
+      throw const LanDecodeException('hello-version');
+    }
+    return LanHello(features: view.getUint16(1, Endian.big));
+  }
+}
+
+class LanVideoConfig {
+  const LanVideoConfig({
+    required this.width,
+    required this.height,
+    required this.fpsMilli,
+    required this.sps,
+    required this.pps,
+  });
+
+  static const codecH264 = 1;
+  static const nalLengthSize = 4;
+
+  final int width;
+  final int height;
+  final int fpsMilli;
+  final Uint8List sps;
+  final Uint8List pps;
+
+  Uint8List encode() {
+    final out = Uint8List(14 + sps.length + pps.length);
+    final view = ByteData.sublistView(out);
+    view.setUint8(0, codecH264);
+    view.setUint8(1, nalLengthSize);
+    view.setUint16(2, width, Endian.big);
+    view.setUint16(4, height, Endian.big);
+    view.setUint32(6, fpsMilli, Endian.big);
+    view.setUint16(10, sps.length, Endian.big);
+    out.setRange(12, 12 + sps.length, sps);
+    final ppsAt = 12 + sps.length;
+    ByteData.sublistView(out).setUint16(ppsAt, pps.length, Endian.big);
+    out.setRange(ppsAt + 2, out.length, pps);
+    return out;
+  }
+
+  static LanVideoConfig decode(Uint8List payload) {
+    if (payload.length < 14) throw const LanDecodeException('config');
+    final view = ByteData.sublistView(payload);
+    if (view.getUint8(0) != codecH264) throw const LanDecodeException('codec');
+    if (view.getUint8(1) != nalLengthSize) {
+      throw const LanDecodeException('nal-length');
+    }
+    final width = view.getUint16(2, Endian.big);
+    final height = view.getUint16(4, Endian.big);
+    final fpsMilli = view.getUint32(6, Endian.big);
+    final spsLength = view.getUint16(10, Endian.big);
+    final spsEnd = 12 + spsLength;
+    if (payload.length < spsEnd + 2) throw const LanDecodeException('sps');
+    final sps = Uint8List.sublistView(payload, 12, spsEnd);
+    final ppsLength = ByteData.sublistView(payload)
+        .getUint16(spsEnd, Endian.big);
+    final ppsEnd = spsEnd + 2 + ppsLength;
+    if (payload.length < ppsEnd) throw const LanDecodeException('pps');
+    final pps = Uint8List.sublistView(payload, spsEnd + 2, ppsEnd);
+    return LanVideoConfig(
+      width: width,
+      height: height,
+      fpsMilli: fpsMilli,
+      sps: sps,
+      pps: pps,
+    );
+  }
+}
+
+class LanVideoFrame {
+  const LanVideoFrame({
+    required this.keyframe,
+    required this.ptsUs,
+    required this.senderLatencyUs,
+    required this.nalus,
+  });
+
+  static const prefixSize = 16;
+  static const keyframeFlag = 1;
+
+  final bool keyframe;
+  final int ptsUs;
+  final int senderLatencyUs;
+  final Uint8List nalus;
+
+  Uint8List encode() {
+    final out = Uint8List(prefixSize + nalus.length);
+    final view = ByteData.sublistView(out);
+    view.setUint16(0, keyframe ? keyframeFlag : 0, Endian.big);
+    view.setUint16(2, 0, Endian.big);
+    view.setUint64(4, ptsUs, Endian.big);
+    view.setUint32(12, senderLatencyUs, Endian.big);
+    out.setRange(prefixSize, out.length, nalus);
+    return out;
+  }
+
+  static LanVideoFrame decode(Uint8List payload) {
+    if (payload.length < prefixSize) throw const LanDecodeException('frame');
+    final view = ByteData.sublistView(payload);
+    final flags = view.getUint16(0, Endian.big);
+    return LanVideoFrame(
+      keyframe: flags & keyframeFlag != 0,
+      ptsUs: view.getUint64(4, Endian.big),
+      senderLatencyUs: view.getUint32(12, Endian.big),
+      nalus: Uint8List.sublistView(payload, prefixSize),
+    );
+  }
+}
+
+/// Reserved. The phone will send this later; neither side transmits it now.
+class LanInputReport {
+  const LanInputReport({
+    required this.sequence,
+    required this.buttons,
+    this.lx = 0,
+    this.ly = 0,
+    this.rx = 0,
+    this.ry = 0,
+    this.l2 = 0,
+    this.r2 = 0,
+  });
+
+  final int sequence;
+  final int buttons;
+  final int lx;
+  final int ly;
+  final int rx;
+  final int ry;
+  final int l2;
+  final int r2;
+
+  Uint8List encode() {
+    final out = Uint8List(18);
+    final view = ByteData.sublistView(out);
+    view.setUint32(0, sequence, Endian.big);
+    view.setUint32(4, buttons, Endian.big);
+    view.setInt16(8, lx, Endian.big);
+    view.setInt16(10, ly, Endian.big);
+    view.setInt16(12, rx, Endian.big);
+    view.setInt16(14, ry, Endian.big);
+    view.setUint8(16, l2);
+    view.setUint8(17, r2);
+    return out;
+  }
+
+  static LanInputReport decode(Uint8List payload) {
+    if (payload.length < 18) throw const LanDecodeException('input');
+    final view = ByteData.sublistView(payload);
+    return LanInputReport(
+      sequence: view.getUint32(0, Endian.big),
+      buttons: view.getUint32(4, Endian.big),
+      lx: view.getInt16(8, Endian.big),
+      ly: view.getInt16(10, Endian.big),
+      rx: view.getInt16(12, Endian.big),
+      ry: view.getInt16(14, Endian.big),
+      l2: view.getUint8(16),
+      r2: view.getUint8(17),
+    );
+  }
+}
+
+class LanPing {
+  const LanPing(this.clientTimeUs);
+
+  final int clientTimeUs;
+
+  Uint8List encode() {
+    final out = Uint8List(8);
+    ByteData.sublistView(out).setUint64(0, clientTimeUs, Endian.big);
+    return out;
+  }
+
+  static LanPing decode(Uint8List payload) {
+    if (payload.length < 8) throw const LanDecodeException('ping');
+    return LanPing(ByteData.sublistView(payload).getUint64(0, Endian.big));
+  }
+}
+
+class LanPong {
+  const LanPong({required this.clientTimeUs, required this.serverTimeUs});
+
+  final int clientTimeUs;
+  final int serverTimeUs;
+
+  Uint8List encode() {
+    final out = Uint8List(16);
+    final view = ByteData.sublistView(out);
+    view.setUint64(0, clientTimeUs, Endian.big);
+    view.setUint64(8, serverTimeUs, Endian.big);
+    return out;
+  }
+
+  static LanPong decode(Uint8List payload) {
+    if (payload.length < 16) throw const LanDecodeException('pong');
+    final view = ByteData.sublistView(payload);
+    return LanPong(
+      clientTimeUs: view.getUint64(0, Endian.big),
+      serverTimeUs: view.getUint64(8, Endian.big),
+    );
+  }
+}
+
+int clampStreamBitrateMbps(int value) => value.clamp(10, 20);
+
+int normalizeStreamHeight(int height) => height <= 720 ? 720 : 1080;
+
+class ManualEndpoint {
+  const ManualEndpoint(this.host, this.port);
+
+  final String host;
+  final int port;
+}
+
+ManualEndpoint? parseManualEndpoint(
+  String raw, {
+  int defaultPort = LanLimits.port,
+}) {
+  final text = raw.trim();
+  if (text.isEmpty) return null;
+  if (text.startsWith('[')) {
+    final end = text.indexOf(']');
+    if (end <= 1) return null;
+    final host = text.substring(1, end);
+    var port = defaultPort;
+    if (end + 1 < text.length && text[end + 1] == ':') {
+      final parsed = int.tryParse(text.substring(end + 2));
+      if (parsed == null || parsed <= 0 || parsed > 65535) return null;
+      port = parsed;
+    }
+    return ManualEndpoint(host, port);
+  }
+  final colon = text.lastIndexOf(':');
+  if (colon > 0 && !text.substring(0, colon).contains(':')) {
+    final parsed = int.tryParse(text.substring(colon + 1));
+    if (parsed != null && parsed > 0 && parsed <= 65535) {
+      return ManualEndpoint(text.substring(0, colon), parsed);
+    }
+  }
+  return ManualEndpoint(text, defaultPort);
+}

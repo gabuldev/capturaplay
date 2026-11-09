@@ -170,3 +170,29 @@ class FullScreenChanged extends CaptureEvent {
 
   final bool fullscreen;
 }
+
+class StreamingRequest {
+  const StreamingRequest({
+    required this.enabled,
+    required this.bitrateMbps,
+    required this.height,
+  });
+
+  final bool enabled;
+  final int bitrateMbps;
+  final int height;
+}
+
+class StreamStatusChanged extends CaptureEvent {
+  const StreamStatusChanged({
+    required this.enabled,
+    required this.clients,
+    this.error,
+    this.port = 0,
+  });
+
+  final bool enabled;
+  final int clients;
+  final String? error;
+  final int port;
+}

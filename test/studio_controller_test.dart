@@ -125,6 +125,23 @@ void main() {
     controller.dispose();
   });
 
+  test('transmissão pede H.264 na rede sem reiniciar a captura', () async {
+    final client = readyClient();
+    final controller = StudioController(client: client);
+    await controller.bootstrap();
+    final startsBefore = client.starts.length;
+
+    await controller.toggleStreaming();
+    expect(controller.streaming, isTrue);
+    expect(client.calls, contains('setStreaming:true:12:1080'));
+    expect(client.starts, hasLength(startsBefore));
+
+    await controller.chooseStreamHeight(720);
+    expect(controller.streamHeight, 720);
+    expect(client.calls.last, 'setStreaming:true:12:720');
+    controller.dispose();
+  });
+
   test('Cam Link conectado depois da abertura entra sozinho', () async {
     final client = FakeCaptureClient(
       formats: const [hd60],

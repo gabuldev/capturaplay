@@ -81,6 +81,14 @@ class ControlBar extends StatelessWidget {
                 ),
                 VolumeControl(controller: controller),
                 IconAction(
+                  tooltip: controller.streaming
+                      ? 'Parar transmissão'
+                      : 'Transmitir na rede',
+                  icon: Icons.cast,
+                  active: controller.streaming,
+                  onPressed: controller.toggleStreaming,
+                ),
+                IconAction(
                   tooltip: controller.statsVisible
                       ? 'Ocultar dados (I)'
                       : 'Mostrar dados (I)',
@@ -105,6 +113,56 @@ class ControlBar extends StatelessWidget {
                 ),
               ],
             ),
+            if (controller.streaming) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  FieldMenu(
+                    label: 'Rede',
+                    value: controller.streamHeight == 720 ? '720p' : '1080p',
+                    enabled: true,
+                    entries: [
+                      MenuEntry(
+                        id: '1080',
+                        label: '1080p',
+                        selected: controller.streamHeight != 720,
+                      ),
+                      MenuEntry(
+                        id: '720',
+                        label: '720p',
+                        selected: controller.streamHeight == 720,
+                      ),
+                    ],
+                    onSelected: (id) =>
+                        controller.chooseStreamHeight(id == '720' ? 720 : 1080),
+                  ),
+                  SizedBox(
+                    width: 180,
+                    child: Slider(
+                      min: 10,
+                      max: 20,
+                      divisions: 10,
+                      value: controller.streamBitrateMbps.toDouble(),
+                      label: '${controller.streamBitrateMbps} Mb/s',
+                      onChanged: controller.previewStreamBitrate,
+                      onChangeEnd: (_) => controller.commitStreamBitrate(),
+                    ),
+                  ),
+                  Text(
+                    controller.streamStatusLabel,
+                    style: TextStyle(
+                      color: controller.streamError == null
+                          ? CapturaColors.muted
+                          : CapturaColors.danger,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 6),
             const Text(
               'F ou duplo clique: tela cheia    ⌘⌃F: tela cheia do sistema    M: mudo    I: dados    ↑↓: volume',

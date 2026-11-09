@@ -155,6 +155,13 @@ CaptureEvent? eventFrom(Object? raw) {
       );
     case 'fullscreen':
       return FullScreenChanged(asBool(map['value']));
+    case 'stream':
+      return StreamStatusChanged(
+        enabled: asBool(map['enabled']),
+        clients: asInt(map['clients']),
+        error: asOptionalString(map['error']),
+        port: asInt(map['port']),
+      );
     default:
       return null;
   }

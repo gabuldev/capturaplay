@@ -83,6 +83,15 @@ class MethodChannelCaptureClient implements CaptureClient {
   @override
   Future<void> openPrivacySettings() => _invokeVoid('openPrivacySettings');
 
+  @override
+  Future<void> setStreaming(StreamingRequest request) {
+    return _invokeVoid('setStreaming', {
+      'enabled': request.enabled,
+      'bitrateMbps': request.bitrateMbps,
+      'height': request.height,
+    });
+  }
+
   Future<T> _invoke<T>(
     String method,
     Object? arguments,

@@ -30,6 +30,11 @@ class StudioController extends ChangeNotifier {
   bool statsVisible = false;
   CaptureStats? stats;
   bool fullscreen = false;
+  bool streaming = false;
+  int streamBitrateMbps = 12;
+  int streamHeight = 1080;
+  int streamClients = 0;
+  String? streamError;
 
   String? preferredVideoId;
   String? preferredAudioId;
@@ -111,6 +116,49 @@ class StudioController extends ChangeNotifier {
 
   Future<void> toggleFullscreen() => client.toggleFullScreen();
 
+  Future<void> toggleStreaming() async {
+    streaming = !streaming;
+    await _pushStreaming();
+    notifyListeners();
+  }
+
+  void previewStreamBitrate(double mbps) {
+    streamBitrateMbps = clampStreamBitrateMbps(mbps.round());
+    notifyListeners();
+  }
+
+  Future<void> commitStreamBitrate() => _pushStreaming();
+
+  Future<void> chooseStreamHeight(int height) async {
+    streamHeight = normalizeStreamHeight(height);
+    await _pushStreaming();
+    notifyListeners();
+  }
+
+  Future<void> _pushStreaming() async {
+    try {
+      await client.setStreaming(
+        StreamingRequest(
+          enabled: streaming,
+          bitrateMbps: streamBitrateMbps,
+          height: streamHeight,
+        ),
+      );
+      if (streaming) streamError = null;
+    } on CaptureFailure catch (error) {
+      streamError = error.detail ?? error.code;
+      streaming = false;
+    }
+  }
+
+  String get streamStatusLabel {
+    if (streamError != null) return streamError!;
+    if (streamClients > 0) {
+      return 'Na rede · iPhone ligado · $streamBitrateMbps Mb/s';
+    }
+    return 'Na rede · à espera do iPhone · porta ${LanLimits.port}';
+  }
+
   Future<void> openPrivacySettings() => client.openPrivacySettings();
 
   Future<void> setCursorHidden(bool hidden) async {
@@ -130,6 +178,9 @@ class StudioController extends ChangeNotifier {
 
   Future<void> _release() async {
     try {
+      await client.setStreaming(
+        const StreamingRequest(enabled: false, bitrateMbps: 12, height: 1080),
+      );
       await client.setCursorHidden(false);
       await client.stop();
     } on Object {
@@ -207,6 +258,7 @@ class StudioController extends ChangeNotifier {
       );
       if (revision != _revision) return;
       _applySession(status);
+      if (streaming) await _pushStreaming();
     } on CaptureFailure catch (error) {
       if (revision != _revision) return;
       running = false;
@@ -242,6 +294,11 @@ class StudioController extends ChangeNotifier {
         notifyListeners();
       case FullScreenChanged(:final fullscreen):
         this.fullscreen = fullscreen;
+        notifyListeners();
+      case StreamStatusChanged(:final enabled, :final clients, :final error):
+        streamClients = clients;
+        streamError = error;
+        if (!enabled && error != null) streaming = false;
         notifyListeners();
     }
   }

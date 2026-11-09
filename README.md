@@ -147,55 +147,48 @@ Se o CapturaPlay disser que o dispositivo está em uso, feche a fonte do Cam Lin
 - Cam Link 4K: 1080p60 ou 4K30, não 4K60.
 - Plataform view no macOS ainda tem arestas. O duplo clique depende do `NSView` devolver `nil` no hit test. `F` e `⌘⌃F` não dependem disso.
 - A tela não apaga durante a sessão. Suspender pela tampa continua possível.
-- O entitlement de rede de servidor não está no Release. A fase 2 vai precisar dele.
+- O áudio do jogo fica no Mac. O iPhone recebe só vídeo.
 
 ## Onde está o código
 
 - `lib/` — interface em pt-BR, atalhos, barra, estado.
-- `packages/captura_capture/` — API Dart testável (escolha de dispositivo e formato) e o plugin Swift.
+- `packages/captura_capture/` — API Dart testável (escolha de dispositivo, formato e o protocolo da rede) e o plugin Swift.
 - `CaptureEngine.swift` — sessão, formatos, áudio, sono da tela.
-- `CaptureMediaSink.swift` — contrato do futuro encoder.
-- `PreviewHostView.swift` — a layer de prévia.
+- `LanSender.swift` — H.264 e o servidor na LAN. Só entra como `CaptureMediaSink` enquanto a transmissão está ligada.
+- `CapturaReceiverPlugin.swift` — receptor do iPhone.
+- `lib/src/lan_protocol.dart` — o formato dos bytes. O Swift (`LanWire.swift`) tem de bater com ele.
 
-Para um módulo de streaming no mesmo target Swift, registre o sink em `CaptureEngine.addMediaSink`. De outro target, o plugin é publicado no registry com a chave `CapturaCapturePlugin` (`CapturaCapturePlugin.registryKey`) e o `engine` é público. O callback do sink roda na fila de captura: retenha o pixel buffer se ainda precisar dele e saia logo. Não mande o frame pelo method channel.
+## Transmitir para o iPhone
 
-## Fase 2: streaming na rede local
+O mesmo projeto Flutter vira receptor no iPhone. No Mac, com a captura já rodando, toque em **Transmitir na rede**. O app anuncia `_capturaplay._tcp` (Bonjour) e escuta TCP na porta **47731**. O vídeo é H.264 em hardware (VideoToolbox): tempo real, perfil Baseline, sem frame B, keyframe cerca de duas vezes por segundo, 1080p ou 720p, 10–20 Mb/s.
 
-Não está implementado. O desenho, para quando for a hora:
+A prévia de quem joga no Mac continua no `AVCaptureVideoPreviewLayer`. O encoder não desenha essa prévia. Ele só existe com a transmissão ligada, numa fila própria, e descarta o quadro se ainda estiver ocupado com o anterior. O áudio local não muda: continua no `AVCaptureAudioPreviewOutput`. O iPhone fica sem som. Áudio no stream é um TODO de propósito, para não mexer nesse caminho.
 
-O Mac continua capturando. Um `LanStreamService` no mesmo processo implementa `CaptureMediaSink` e recebe os mesmos sample buffers, sem cópia para o Dart.
+No iPhone (Flutter 3.47.5, iOS 16 ou mais novo), o aparelho e o Mac na mesma Wi-Fi, sem VPN e sem isolamento de cliente no roteador:
 
-```
-CaptureEngine
-  ├─ AVCaptureVideoPreviewLayer     quem joga no Mac, hoje
-  ├─ AVCaptureAudioPreviewOutput    som local, hoje
-  └─ CaptureMediaSink               só quando alguém registra
-        ├─ vídeo NV12 + IOSurface
-        └─ áudio PCM
-              │
-              v
-        VideoToolbox (H.264, baixa latência, sem frame B)
-        + WebRTC (pista de vídeo e áudio)
-              │
-              v
-        TV (webOS ou Tizen, página web) ou um browser na mesma Wi-Fi
+```bash
+flutter pub get
+flutter devices
+flutter run -d <id-do-iphone>
 ```
 
-WebRTC é a proposta porque a TV abre uma página, sem app nativo, e o orçamento de latência é melhor que HLS. Sinalização mínima na LAN (HTTP ou WebSocket na máquina) e candidatos ICE só do tipo host, sem STUN, numa rede simples.
+Na primeira vez o Xcode pede um time de assinatura. Abra `ios/Runner.xcworkspace` (ou `ios/Runner.xcodeproj`, se o Flutter local usar Swift Package Manager), no alvo Runner → Signing & Capabilities, escolha o seu Apple Team e deixe o bundle `dev.capturaplay.capturaplay`. O iPhone precisa confiar no perfil de desenvolvimento em Ajustes → Geral → VPN e gerenciamento de dispositivo.
 
-Perguntas em aberto, de propósito:
+O app abre deitado, sem barra de status, e procura o Mac sozinho. Se o Bonjour não aparecer, digite o IP do Mac. A permissão de rede local tem de ser aceita. Toque na imagem para ver os dados (fps e latência estimada) e para desconectar. Se a ligação cair, ele tenta de novo. A tela não apaga enquanto o receptor está aberto.
 
-1. **O que o browser da TV aceita.** webOS e Tizen usam Chromium, mas a versão e o WebRTC variam por ano de modelo. H.264 Constrained Baseline é o perfil seguro. HEVC no browser da TV é aposta ruim. Dá para confirmar só com um aparelho na mesa.
-2. **Medir o data output com a prévia ligada.** Se ligar o sink atrasar a imagem de quem joga, as opções são aceitar esse custo ou desenhar a mesma IOSurface numa textura Flutter e ter um consumidor só. A troca fica na ponta da tela; a sessão não muda de dono.
-3. **Encoder de hardware.** `VTCompressionSession` em tempo real, GOP curto ou intra-refresh, sem frame B. O OBS, capturando a janela, também pode estar codificando. Apple Silicon aguenta mais de uma sessão VideoToolbox, mas o limite existe e precisa ser medido com os dois ligados.
-4. **Relógio do áudio.** A prévia local continua no `AVCaptureAudioPreviewOutput` para quem joga no Mac. O stream usa o data output de áudio, sincronizado pelo PTS. TV e caixas do Mac no mesmo cômodo geram eco: o desenho assume fone, ou a TV muda.
-5. **Achar o Mac na rede.** mDNS contra digitar o IP. Isolamento de cliente no roteador, e alguns browsers de TV que exigem TURN mesmo na LAN, podem impedir o par direto. Isso só se descobre na rede de casa.
-6. **Sandbox.** Release hoje não tem `com.apple.security.network.server` nem `network.client`. A fase 2 precisa dos dois, e de uma nova revisão da App Sandbox.
-7. **Bitrate.** 1080p60 limpo de jogo fica na casa de 8–15 Mbit/s. Wi-Fi 5 GHz ou cabo. 2,4 GHz fica como pergunta, não como plano.
-8. **HDCP.** Só sai o que o console já entregou desprotegido. Não há plano de furar proteção.
-9. **Onde mora o código.** No processo do CapturaPlay, como sink. Um processo auxiliar copiaria o frame de novo.
+A latência na tela do telefone é o tempo de encode no Mac mais metade do ping. Não é uma medida de vidro a vidro.
 
-A página da TV (webOS / Tizen / browser) não faz parte deste repositório.
+O fio é TCP com mensagens `CPL1`: configuração H.264 (SPS/PPS) e quadros em AVCC, com tamanho de NAL de 4 bytes. O iPhone monta um `CMSampleBuffer` e entrega para um `AVSampleBufferDisplayLayer`, que decodifica e mostra sem passar pela textura do Flutter. Quadro atrasado é descartado, não enfileirado. Só um aparelho por vez: uma ligação nova substitui a anterior.
+
+O tipo de mensagem `0x30` está reservado para o controle do iPhone voltar ao Mac. O formato está em `LanInputReport` e tem teste. Ninguém envia isso ainda.
+
+Limites desta transmissão:
+
+- Sem áudio no iPhone.
+- Wi-Fi 5 GHz ou cabo no Mac. 2,4 GHz costuma não aguentar 1080p60.
+- O firewall do macOS pode pedir permissão na primeira vez.
+- Release precisa de `com.apple.security.network.server` e `network.client` (já estão nos entitlements) e de `NSLocalNetworkUsageDescription` / `NSBonjourServices` nos dois Info.plist.
+- TV webOS / Tizen / browser continuam fora. O protocolo não é WebRTC.
 
 ## O que este ambiente verificou
 
@@ -204,9 +197,9 @@ O ambiente em que o projeto foi escrito é Linux. Ele não compila target macOS 
 Rodou aqui:
 
 - `flutter analyze` no app e no plugin
-- `flutter test` no app e no plugin (escolha de dispositivo e formato, textos, decodificação do estado nativo, controlador com um cliente falso, e a tela sem hardware)
+- `flutter test` no app e no plugin (escolha de dispositivo e formato, textos, decodificação do estado nativo, controlador com um cliente falso, a tela sem hardware, e o enquadramento do protocolo da rede)
 
-Ainda precisa de um Mac de verdade:
+Ainda precisa de um Mac e de um iPhone de verdade:
 
 - `flutter run -d macos` e `flutter build macos` no Xcode
 - diálogo de câmera e microfone, e o app sandboxed enxergando o Cam Link
@@ -214,3 +207,6 @@ Ainda precisa de um Mac de verdade:
 - tela cheia, cursor, volume, mudo, sono da tela
 - o número da latência com o Cam Link ligado, com a sobreposição ligada e desligada
 - OBS capturando a janela enquanto o CapturaPlay segura o USB, e o erro quando o OBS segura o USB primeiro
+- `flutter run -d macos` com “Transmitir na rede” ligado, e `flutter run -d <iphone>` no mesmo Wi-Fi
+- Bonjour, a permissão de rede local, a porta 47731, 1080p e 720p, e a latência estimada no telefone
+- a prévia do Mac continuar lisa com a transmissão ligada

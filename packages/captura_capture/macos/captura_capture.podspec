@@ -14,5 +14,5 @@ Captura vídeo e áudio de um dispositivo UVC (como um Cam Link) com prévia nat
   s.platform = :osx, '14.0'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
   s.swift_version = '5.0'
-  s.frameworks = 'AVFoundation', 'CoreMedia', 'CoreVideo', 'Cocoa'
+  s.frameworks = 'AVFoundation', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'Network', 'Cocoa'
 end

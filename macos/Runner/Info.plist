@@ -36,5 +36,11 @@
 	<string>O CapturaPlay usa a câmera para mostrar o vídeo do capturador USB, como um Cam Link, com a menor latência possível.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>O CapturaPlay usa o microfone para reproduzir o áudio do capturador USB junto com o vídeo. Essa entrada é o som do próprio capturador, não o microfone do Mac.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>O CapturaPlay anuncia a transmissão na rede local para o iPhone encontrar este Mac.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_capturaplay._tcp</string>
+	</array>
 </dict>
 </plist>

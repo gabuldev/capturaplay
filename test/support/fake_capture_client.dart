@@ -108,4 +108,11 @@ class FakeCaptureClient implements CaptureClient {
   Future<void> openPrivacySettings() async {
     calls.add('openPrivacySettings');
   }
+
+  @override
+  Future<void> setStreaming(StreamingRequest request) async {
+    calls.add(
+      'setStreaming:${request.enabled}:${request.bitrateMbps}:${request.height}',
+    );
+  }
 }

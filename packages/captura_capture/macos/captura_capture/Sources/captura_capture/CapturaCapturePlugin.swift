@@ -17,6 +17,7 @@ public final class CapturaCapturePlugin: NSObject, FlutterPlugin, FlutterStreamH
     public static let registryKey = "CapturaCapturePlugin"
 
     public let engine: CaptureEngine
+    private let sender = LanSender()
     private var eventSink: FlutterEventSink?
     private var cursorHidden = false
 
@@ -39,6 +40,16 @@ public final class CapturaCapturePlugin: NSObject, FlutterPlugin, FlutterStreamH
         self.engine = engine
         super.init()
         engine.delegate = self
+        sender.onStatus = { [weak self] enabled, clients, error in
+            var event: [String: Any] = [
+                "type": "stream",
+                "enabled": enabled,
+                "clients": clients,
+                "port": Int(LanLimits.port),
+            ]
+            event["error"] = error ?? NSNull()
+            self?.eventSink?(event)
+        }
     }
 
     public func handle(_ call: FlutterMethodCall, result callback: @escaping FlutterResult) {
@@ -103,6 +114,19 @@ public final class CapturaCapturePlugin: NSObject, FlutterPlugin, FlutterStreamH
             }
         case "setStatsEnabled":
             engine.setStatsEnabled(Self.boolValue(args["enabled"]) ?? false)
+            callback(nil)
+        case "setStreaming":
+            let enabled = Self.boolValue(args["enabled"]) ?? false
+            let bitrate = Int(Self.doubleValue(args["bitrateMbps"]) ?? 12)
+            let height = Int(Self.doubleValue(args["height"]) ?? 1080)
+            if enabled {
+                sender.update(bitrateMbps: bitrate, height: height)
+                sender.startListening()
+                engine.addMediaSink(sender)
+            } else {
+                engine.removeMediaSink(sender)
+                sender.stop()
+            }
             callback(nil)
         case "setCursorHidden":
             let hidden = Self.boolValue(args["hidden"]) ?? false

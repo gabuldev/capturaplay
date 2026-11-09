@@ -27,4 +27,6 @@ abstract class CaptureClient {
   Future<void> toggleFullScreen();
 
   Future<void> openPrivacySettings();
+
+  Future<void> setStreaming(StreamingRequest request);
 }
