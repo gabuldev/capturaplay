@@ -1,0 +1,15 @@
+// Application-level settings for the Runner target.
+//
+// This may be replaced with something auto-generated from metadata (e.g., pubspec.yaml) in the
+// future. If not, the values below would default to using the project name when this becomes a
+// 'flutter create' template.
+
+// Executable and bundle names stay lowercase so the Xcode paths remain stable.
+// The name the person sees is CapturaPlay, set in Info.plist (CFBundleDisplayName).
+PRODUCT_NAME = capturaplay
+
+// The application's bundle identifier
+PRODUCT_BUNDLE_IDENTIFIER = dev.capturaplay.capturaplay
+
+// The copyright displayed in application information
+PRODUCT_COPYRIGHT = Copyright © 2026 CapturaPlay. All rights reserved.

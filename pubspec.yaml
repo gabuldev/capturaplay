@@ -1,0 +1,21 @@
+name: capturaplay
+description: Prévia de baixa latência de um capturador USB no Mac.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.7
+
+dependencies:
+  captura_capture:
+    path: packages/captura_capture
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
