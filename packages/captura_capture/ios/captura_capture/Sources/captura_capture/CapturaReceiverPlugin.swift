@@ -104,6 +104,7 @@ final class DisplayHostView: UIView {
         backgroundColor = .black
         sampleLayer.videoGravity = .resizeAspect
         sampleLayer.backgroundColor = UIColor.black.cgColor
+        sampleLayer.preventsDisplaySleepDuringVideoPlayback = true
     }
 
     required init?(coder: NSCoder) {
@@ -129,9 +130,11 @@ final class ReceiverHub {
     private var lastKeyframe: CMSampleBuffer?
     private weak var display: DisplayHostView?
     private var pingTimer: DispatchSourceTimer?
-    private var rttUs: UInt64 = 0
+    private var clockOffsetUs: Int64 = 0
     private var frameTimes: [CFTimeInterval] = []
     private var lastStats: CFTimeInterval = 0
+    private var lastSequence: UInt16?
+    private var droppedFrames = 0
 
     func start() {
         DispatchQueue.main.async {
@@ -307,11 +310,14 @@ final class ReceiverHub {
                 case LanType.videoFrame:
                     applyFrame(message.payload)
                 case LanType.pong:
-                    if let clientTime = LanWire.pingTime(of: message.payload), message.payload.count >= 16 {
-                        let now = Self.nowUs()
-                        if now >= clientTime {
-                            rttUs = now - clientTime
-                        }
+                    if let times = LanWire.pongTimes(of: message.payload) {
+                        let clientRecv = Self.nowUs()
+                        self.clockOffsetUs = LanWire.clockOffsetUs(
+                            clientSend: times.t1,
+                            serverRecv: times.t2,
+                            serverSend: times.t3,
+                            clientRecv: clientRecv
+                        )
                     }
                 case LanType.audioConfig, LanType.audioFrame:
                     // TODO: audio. The Mac does not send it yet.
@@ -396,8 +402,8 @@ final class ReceiverHub {
         if prefix.keyframe {
             lastKeyframe = sample
         }
-        present(sample, keyframe: prefix.keyframe)
-        noteFrame(senderLatencyUs: prefix.senderLatencyUs)
+        noteSequence(prefix.sequence)
+        present(sample, keyframe: prefix.keyframe, captureHostUs: prefix.captureHostUs)
     }
 
     private func markDisplayImmediately(_ sample: CMSampleBuffer) {
@@ -419,38 +425,59 @@ final class ReceiverHub {
         )
     }
 
-    private func present(_ sample: CMSampleBuffer, keyframe: Bool) {
+    private func present(_ sample: CMSampleBuffer, keyframe: Bool, captureHostUs: UInt64) {
         DispatchQueue.main.async { [weak self] in
-            guard let layer = self?.display?.sampleLayer else { return }
-            if layer.status == .failed {
-                layer.flush()
+            guard let self else { return }
+            let displayedAt = Self.nowUs()
+            var enqueued = false
+            if let layer = self.display?.sampleLayer {
+                if layer.status == .failed || keyframe {
+                    layer.flush()
+                }
+                if keyframe || layer.isReadyForMoreMediaData {
+                    layer.enqueue(sample)
+                    enqueued = true
+                }
             }
-            if layer.isReadyForMoreMediaData {
-                layer.enqueue(sample)
-            } else if keyframe {
-                layer.flush()
-                layer.enqueue(sample)
+            self.queue.async {
+                if enqueued {
+                    self.noteDisplayed(captureHostUs: captureHostUs, displayedAt: displayedAt)
+                } else {
+                    self.droppedFrames += 1
+                }
             }
         }
     }
 
-    private func noteFrame(senderLatencyUs: UInt32) {
+    private func noteSequence(_ sequence: UInt16) {
+        if let lastSequence {
+            let gap = Int(sequence &- lastSequence)
+            if gap > 1 && gap < 240 {
+                droppedFrames += gap - 1
+            }
+        }
+        lastSequence = sequence
+    }
+
+    private func noteDisplayed(captureHostUs: UInt64, displayedAt: UInt64) {
         let now = CACurrentMediaTime()
         frameTimes.append(now)
         frameTimes.removeAll { now - $0 > 1 }
         guard now - lastStats >= 0.25 else { return }
         lastStats = now
-        let latencyMs = Double(senderLatencyUs) / 1000.0 + Double(rttUs) / 2000.0
+        let latencyUs = Int64(bitPattern: displayedAt) + clockOffsetUs - Int64(bitPattern: captureHostUs)
+        let latencyMs = latencyUs > 0 && latencyUs < 2_000_000 ? Double(latencyUs) / 1000.0 : 0
         emit(event: [
             "type": "stats",
             "fps": Double(frameTimes.count),
             "latencyMs": latencyMs,
+            "dropped": droppedFrames,
         ])
     }
 
     private func startPing() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
         timer.setEventHandler { [weak self] in
             guard let self, let connection = self.connection else { return }
             self.send(LanWire.ping(clientTimeUs: Self.nowUs()), on: connection)
@@ -466,7 +493,11 @@ final class ReceiverHub {
     private func tcpParameters() -> NWParameters {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
-        return NWParameters(tls: nil, tcp: tcp)
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 2
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        parameters.serviceClass = .interactiveVideo
+        return parameters
     }
 
     private func emitState(phase: String, detail: String?) {

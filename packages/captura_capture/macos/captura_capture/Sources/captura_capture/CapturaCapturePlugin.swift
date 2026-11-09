@@ -117,10 +117,11 @@ public final class CapturaCapturePlugin: NSObject, FlutterPlugin, FlutterStreamH
             callback(nil)
         case "setStreaming":
             let enabled = Self.boolValue(args["enabled"]) ?? false
-            let bitrate = Int(Self.doubleValue(args["bitrateMbps"]) ?? 12)
-            let height = Int(Self.doubleValue(args["height"]) ?? 1080)
+            let bitrate = Int(Self.doubleValue(args["bitrateMbps"]) ?? 8)
+            let height = Int(Self.doubleValue(args["height"]) ?? 720)
+            let lowLatency = Self.boolValue(args["lowLatency"]) ?? true
             if enabled {
-                sender.update(bitrateMbps: bitrate, height: height)
+                sender.update(bitrateMbps: bitrate, height: height, lowLatency: lowLatency)
                 sender.startListening()
                 engine.addMediaSink(sender)
             } else {

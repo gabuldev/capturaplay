@@ -86,12 +86,20 @@ enum LanWire {
         return encode(LanMessage(type: LanType.videoConfig, flags: 0, payload: payload))
     }
 
-    static func videoFrame(keyframe: Bool, ptsUs: UInt64, senderLatencyUs: UInt32, nalus: Data) -> Data {
+    static func videoFrame(
+        keyframe: Bool,
+        sequence: UInt16,
+        ptsUs: UInt64,
+        senderLatencyUs: UInt32,
+        captureHostUs: UInt64,
+        nalus: Data
+    ) -> Data {
         var payload = Data()
         payload.appendU16(keyframe ? 1 : 0)
-        payload.appendU16(0)
+        payload.appendU16(sequence)
         payload.appendU64(ptsUs)
         payload.appendU32(senderLatencyUs)
+        payload.appendU64(captureHostUs)
         payload.append(nalus)
         return encode(LanMessage(type: LanType.videoFrame, flags: 0, payload: payload))
     }
@@ -102,22 +110,32 @@ enum LanWire {
         return encode(LanMessage(type: LanType.ping, flags: 0, payload: payload))
     }
 
-    static func pong(clientTimeUs: UInt64, serverTimeUs: UInt64) -> Data {
+    static func pong(clientTimeUs: UInt64, serverRecvUs: UInt64, serverSendUs: UInt64) -> Data {
         var payload = Data()
         payload.appendU64(clientTimeUs)
-        payload.appendU64(serverTimeUs)
+        payload.appendU64(serverRecvUs)
+        payload.appendU64(serverSendUs)
         return encode(LanMessage(type: LanType.pong, flags: 0, payload: payload))
     }
 
-    static func framePrefix(of payload: Data) -> (keyframe: Bool, ptsUs: UInt64, senderLatencyUs: UInt32, nalus: Data)? {
-        guard payload.count >= 16 else { return nil }
+    static func framePrefix(of payload: Data) -> (keyframe: Bool, sequence: UInt16, ptsUs: UInt64, senderLatencyUs: UInt32, captureHostUs: UInt64, nalus: Data)? {
+        guard payload.count >= 24 else { return nil }
         let flags = payload.u16(0)
         return (
             keyframe: flags & 1 != 0,
+            sequence: payload.u16(2),
             ptsUs: payload.u64(4),
             senderLatencyUs: payload.u32(12),
-            nalus: payload.subdata(in: 16..<payload.count)
+            captureHostUs: payload.u64(16),
+            nalus: payload.subdata(in: 24..<payload.count)
         )
+    }
+
+    /// Same formula as `clockOffsetUs` in lan_protocol.dart.
+    static func clockOffsetUs(clientSend: UInt64, serverRecv: UInt64, serverSend: UInt64, clientRecv: UInt64) -> Int64 {
+        let first = Int64(bitPattern: serverRecv) - Int64(bitPattern: clientSend)
+        let second = Int64(bitPattern: serverSend) - Int64(bitPattern: clientRecv)
+        return (first + second) / 2
     }
 
     static func parameterSets(of payload: Data) -> (width: Int, height: Int, fpsMilli: Int, sps: Data, pps: Data)? {
@@ -139,6 +157,11 @@ enum LanWire {
     static func pingTime(of payload: Data) -> UInt64? {
         guard payload.count >= 8 else { return nil }
         return payload.u64(0)
+    }
+
+    static func pongTimes(of payload: Data) -> (t1: UInt64, t2: UInt64, t3: UInt64)? {
+        guard payload.count >= 24 else { return nil }
+        return (payload.u64(0), payload.u64(8), payload.u64(16))
     }
 }
 

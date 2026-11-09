@@ -22,6 +22,8 @@ final class LanSender: NSObject, CaptureMediaSink {
     private var connection: NWConnection?
     private var parser = LanStreamParser()
     private var pendingSends = 0
+    private var dropUntilKeyframe = false
+    private var frameSequence: UInt16 = 0
     private var compression: VTCompressionSession?
     private var sessionWidth = 0
     private var sessionHeight = 0
@@ -30,8 +32,9 @@ final class LanSender: NSObject, CaptureMediaSink {
     private var cachedConfig: Data?
     private var listening = false
 
-    private(set) var requestedHeight = 1080
-    var bitrate = 12_000_000
+    private(set) var requestedHeight = 720
+    var bitrate = 8_000_000
+    var lowLatency = true
 
     var wantsVideoSamples: Bool { true }
     // Audio stays on AVCaptureAudioPreviewOutput. Adding an audio data output
@@ -41,14 +44,16 @@ final class LanSender: NSObject, CaptureMediaSink {
 
     func consumeAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {}
 
-    func update(bitrateMbps: Int, height: Int) {
+    func update(bitrateMbps: Int, height: Int, lowLatency: Bool) {
         let cappedHeight = height <= 720 ? 720 : 1080
-        let cappedBitrate = min(max(bitrateMbps, 10), 20) * 1_000_000
+        let cappedBitrate = min(max(bitrateMbps, 6), 20) * 1_000_000
         encodeQueue.async {
             let sizeChanged = self.requestedHeight != cappedHeight
+            let modeChanged = self.lowLatency != lowLatency
             self.requestedHeight = cappedHeight
             self.bitrate = cappedBitrate
-            if sizeChanged {
+            self.lowLatency = lowLatency
+            if sizeChanged || modeChanged {
                 self.invalidateEncoderLocked()
             } else if let session = self.compression {
                 VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: self.bitrate as CFNumber)
@@ -61,12 +66,7 @@ final class LanSender: NSObject, CaptureMediaSink {
             guard !self.listening else { return }
             self.listening = true
             do {
-                let tcp = NWProtocolTCP.Options()
-                tcp.noDelay = true
-                tcp.enableKeepalive = true
-                tcp.keepaliveIdle = 2
-                let parameters = NWParameters(tls: nil, tcp: tcp)
-                parameters.includePeerToPeer = true
+                let parameters = self.tcpParameters()
                 let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: LanLimits.port)!)
                 listener.service = NWListener.Service(name: "CapturaPlay", type: LanLimits.serviceType)
                 listener.stateUpdateHandler = { [weak self] state in
@@ -109,17 +109,21 @@ final class LanSender: NSObject, CaptureMediaSink {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let received = CACurrentMediaTime()
+        let captureHostUs = Self.hostUs()
         stateLock.lock()
         let busy = inFlight >= 1
         if !busy { inFlight += 1 }
         stateLock.unlock()
-        guard !busy else { return }
+        guard !busy else {
+            noteDropAndRequestKeyframe()
+            return
+        }
         encodeQueue.async { [weak self] in
-            self?.encode(pixelBuffer, pts: pts, received: received)
+            self?.encode(pixelBuffer, pts: pts, received: received, captureHostUs: captureHostUs)
         }
     }
 
-    private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, received: CFTimeInterval) {
+    private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, received: CFTimeInterval, captureHostUs: UInt64) {
         let sourceWidth = CVPixelBufferGetWidth(pixelBuffer)
         let sourceHeight = CVPixelBufferGetHeight(pixelBuffer)
         let target = targetSize(sourceWidth: sourceWidth, sourceHeight: sourceHeight)
@@ -134,7 +138,7 @@ final class LanSender: NSObject, CaptureMediaSink {
             finishFrame()
             return
         }
-        let token = FrameToken(received: received)
+        let token = FrameToken(received: received, captureHostUs: captureHostUs)
         let refcon = Unmanaged.passRetained(token).toOpaque()
         var flags = VTEncodeInfoFlags()
         let force = takeKeyframeRequest()
@@ -166,6 +170,7 @@ final class LanSender: NSObject, CaptureMediaSink {
         }
         let spec = NSMutableDictionary()
         spec[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder] = true
+        spec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true
         var status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width),
@@ -197,21 +202,28 @@ final class LanSender: NSObject, CaptureMediaSink {
             return false
         }
         let bitrate = self.bitrate
+        let lowLatency = self.lowLatency
+        let interval: Int = lowLatency ? 15 : 60
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 30 as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 0.5 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: interval as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: (lowLatency ? 0.25 : 1.0) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber)
+        let delayStatus = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
+        if delayStatus != noErr {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber)
+        }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
-        let bytesPerSecond = max(bitrate / 8, 1)
-        VTSessionSetProperty(
-            session,
-            key: kVTCompressionPropertyKey_DataRateLimits,
-            value: [bytesPerSecond, 1] as CFArray
-        )
+        if !lowLatency {
+            let bytesPerSecond = max(bitrate / 8, 1)
+            VTSessionSetProperty(
+                session,
+                key: kVTCompressionPropertyKey_DataRateLimits,
+                value: [bytesPerSecond, 1] as CFArray
+            )
+        }
         VTCompressionSessionPrepareToEncodeFrames(session)
         compression = session
         sessionWidth = width
@@ -231,12 +243,14 @@ final class LanSender: NSObject, CaptureMediaSink {
 
     private func handleEncoded(status: OSStatus, sampleBuffer: CMSampleBuffer?, sourceFrameRefcon: UnsafeMutableRawPointer?) {
         defer { finishFrame() }
-        let received: CFTimeInterval
+        let token: FrameToken?
         if let sourceFrameRefcon {
-            received = Unmanaged<FrameToken>.fromOpaque(sourceFrameRefcon).takeRetainedValue().received
+            token = Unmanaged<FrameToken>.fromOpaque(sourceFrameRefcon).takeRetainedValue()
         } else {
-            received = CACurrentMediaTime()
+            token = nil
         }
+        let received = token?.received ?? CACurrentMediaTime()
+        let captureHostUs = token?.captureHostUs ?? Self.hostUs()
         guard status == noErr, let sampleBuffer else { return }
         let latencyUs = UInt32(max(0, (CACurrentMediaTime() - received) * 1_000_000))
         guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
@@ -253,13 +267,16 @@ final class LanSender: NSObject, CaptureMediaSink {
         let ptsUs = pts.isValid && pts.timescale != 0
             ? UInt64(max(0, CMTimeConvertScale(pts, timescale: 1_000_000, method: .roundHalfAwayFromZero).value))
             : 0
+        let sequence = nextSequence()
         let message = LanWire.videoFrame(
             keyframe: keyframe,
+            sequence: sequence,
             ptsUs: ptsUs,
             senderLatencyUs: latencyUs,
+            captureHostUs: captureHostUs,
             nalus: nalus
         )
-        send(message, important: keyframe)
+        send(message, important: false, isKeyframe: keyframe)
     }
 
     private func configMessage(from format: CMFormatDescription) -> Data? {
@@ -414,9 +431,18 @@ final class LanSender: NSObject, CaptureMediaSink {
             for message in messages {
                 switch message.type {
                 case LanType.ping:
+                    let serverRecv = Self.hostUs()
                     if let clientTime = LanWire.pingTime(of: message.payload) {
-                        let now = UInt64(Date().timeIntervalSince1970 * 1_000_000)
-                        send(LanWire.pong(clientTimeUs: clientTime, serverTimeUs: now), important: true)
+                        let serverSend = Self.hostUs()
+                        send(
+                            LanWire.pong(
+                                clientTimeUs: clientTime,
+                                serverRecvUs: serverRecv,
+                                serverSendUs: serverSend
+                            ),
+                            important: true,
+                            isKeyframe: false
+                        )
                     }
                 case LanType.input:
                     // Reserved for a later controller. Do not buffer or act on it.
@@ -432,18 +458,59 @@ final class LanSender: NSObject, CaptureMediaSink {
         }
     }
 
-    private func send(_ data: Data, important: Bool) {
+    private func send(_ data: Data, important: Bool, isKeyframe: Bool = false) {
         networkQueue.async {
             guard let connection = self.connection else { return }
-            if !important && self.pendingSends >= 2 { return }
-            if self.pendingSends >= 4 { return }
-            self.pendingSends += 1
-            connection.send(content: data, completion: .contentProcessed { [weak self] _ in
-                self?.networkQueue.async {
-                    if let self, self.pendingSends > 0 { self.pendingSends -= 1 }
+            if !important {
+                if self.pendingSends > 0 || (self.dropUntilKeyframe && !isKeyframe) {
+                    self.dropUntilKeyframe = true
+                    self.requestKeyframe()
+                    return
                 }
-            })
+                if isKeyframe {
+                    self.dropUntilKeyframe = false
+                }
+                self.pendingSends += 1
+                connection.send(content: data, completion: .contentProcessed { [weak self] _ in
+                    self?.networkQueue.async {
+                        guard let self else { return }
+                        if self.pendingSends > 0 { self.pendingSends -= 1 }
+                    }
+                })
+                return
+            }
+            connection.send(content: data, completion: .contentProcessed { _ in })
         }
+    }
+
+    private func tcpParameters() -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 2
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        parameters.includePeerToPeer = true
+        parameters.serviceClass = .interactiveVideo
+        return parameters
+    }
+
+    private func noteDropAndRequestKeyframe() {
+        networkQueue.async {
+            self.dropUntilKeyframe = true
+            self.requestKeyframe()
+        }
+    }
+
+    private func nextSequence() -> UInt16 {
+        stateLock.lock()
+        let value = frameSequence
+        frameSequence &+= 1
+        stateLock.unlock()
+        return value
+    }
+
+    private static func hostUs() -> UInt64 {
+        UInt64(Date().timeIntervalSince1970 * 1_000_000)
     }
 
     private func publish(enabled: Bool, clients: Int, error: String?) {
@@ -455,7 +522,9 @@ final class LanSender: NSObject, CaptureMediaSink {
 
 private final class FrameToken {
     let received: CFTimeInterval
-    init(received: CFTimeInterval) {
+    let captureHostUs: UInt64
+    init(received: CFTimeInterval, captureHostUs: UInt64) {
         self.received = received
+        self.captureHostUs = captureHostUs
     }
 }

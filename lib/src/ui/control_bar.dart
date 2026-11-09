@@ -121,6 +121,25 @@ class ControlBar extends StatelessWidget {
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   FieldMenu(
+                    label: 'Modo',
+                    value: controller.lowLatency ? 'Latência' : 'Qualidade',
+                    enabled: true,
+                    entries: [
+                      MenuEntry(
+                        id: 'low',
+                        label: 'Latência',
+                        selected: controller.lowLatency,
+                      ),
+                      MenuEntry(
+                        id: 'quality',
+                        label: 'Qualidade',
+                        selected: !controller.lowLatency,
+                      ),
+                    ],
+                    onSelected: (id) =>
+                        controller.chooseLatencyMode(id != 'quality'),
+                  ),
+                  FieldMenu(
                     label: 'Rede',
                     value: controller.streamHeight == 720 ? '720p' : '1080p',
                     enabled: true,
@@ -142,9 +161,9 @@ class ControlBar extends StatelessWidget {
                   SizedBox(
                     width: 180,
                     child: Slider(
-                      min: 10,
+                      min: 6,
                       max: 20,
-                      divisions: 10,
+                      divisions: 14,
                       value: controller.streamBitrateMbps.toDouble(),
                       label: '${controller.streamBitrateMbps} Mb/s',
                       onChanged: controller.previewStreamBitrate,

@@ -194,8 +194,9 @@ class LanVideoConfig {
     final spsEnd = 12 + spsLength;
     if (payload.length < spsEnd + 2) throw const LanDecodeException('sps');
     final sps = Uint8List.sublistView(payload, 12, spsEnd);
-    final ppsLength = ByteData.sublistView(payload)
-        .getUint16(spsEnd, Endian.big);
+    final ppsLength = ByteData.sublistView(
+      payload,
+    ).getUint16(spsEnd, Endian.big);
     final ppsEnd = spsEnd + 2 + ppsLength;
     if (payload.length < ppsEnd) throw const LanDecodeException('pps');
     final pps = Uint8List.sublistView(payload, spsEnd + 2, ppsEnd);
@@ -215,23 +216,28 @@ class LanVideoFrame {
     required this.ptsUs,
     required this.senderLatencyUs,
     required this.nalus,
+    this.sequence = 0,
+    this.captureHostUs = 0,
   });
 
-  static const prefixSize = 16;
+  static const prefixSize = 24;
   static const keyframeFlag = 1;
 
   final bool keyframe;
   final int ptsUs;
   final int senderLatencyUs;
+  final int sequence;
+  final int captureHostUs;
   final Uint8List nalus;
 
   Uint8List encode() {
     final out = Uint8List(prefixSize + nalus.length);
     final view = ByteData.sublistView(out);
     view.setUint16(0, keyframe ? keyframeFlag : 0, Endian.big);
-    view.setUint16(2, 0, Endian.big);
+    view.setUint16(2, sequence & 0xffff, Endian.big);
     view.setUint64(4, ptsUs, Endian.big);
     view.setUint32(12, senderLatencyUs, Endian.big);
+    view.setUint64(16, captureHostUs, Endian.big);
     out.setRange(prefixSize, out.length, nalus);
     return out;
   }
@@ -242,8 +248,10 @@ class LanVideoFrame {
     final flags = view.getUint16(0, Endian.big);
     return LanVideoFrame(
       keyframe: flags & keyframeFlag != 0,
+      sequence: view.getUint16(2, Endian.big),
       ptsUs: view.getUint64(4, Endian.big),
       senderLatencyUs: view.getUint32(12, Endian.big),
+      captureHostUs: view.getUint64(16, Endian.big),
       nalus: Uint8List.sublistView(payload, prefixSize),
     );
   }
@@ -319,30 +327,77 @@ class LanPing {
 }
 
 class LanPong {
-  const LanPong({required this.clientTimeUs, required this.serverTimeUs});
+  const LanPong({
+    required this.clientTimeUs,
+    required this.serverRecvUs,
+    required this.serverSendUs,
+  });
 
   final int clientTimeUs;
-  final int serverTimeUs;
+  final int serverRecvUs;
+  final int serverSendUs;
 
   Uint8List encode() {
-    final out = Uint8List(16);
+    final out = Uint8List(24);
     final view = ByteData.sublistView(out);
     view.setUint64(0, clientTimeUs, Endian.big);
-    view.setUint64(8, serverTimeUs, Endian.big);
+    view.setUint64(8, serverRecvUs, Endian.big);
+    view.setUint64(16, serverSendUs, Endian.big);
     return out;
   }
 
   static LanPong decode(Uint8List payload) {
-    if (payload.length < 16) throw const LanDecodeException('pong');
+    if (payload.length < 24) throw const LanDecodeException('pong');
     final view = ByteData.sublistView(payload);
     return LanPong(
       clientTimeUs: view.getUint64(0, Endian.big),
-      serverTimeUs: view.getUint64(8, Endian.big),
+      serverRecvUs: view.getUint64(8, Endian.big),
+      serverSendUs: view.getUint64(16, Endian.big),
     );
   }
 }
 
-int clampStreamBitrateMbps(int value) => value.clamp(10, 20);
+/// How much to add to the receiver clock to estimate the sender clock.
+///
+/// T1 client send, T2 server receive, T3 server send, T4 client receive.
+int clockOffsetUs({
+  required int clientSendUs,
+  required int serverRecvUs,
+  required int serverSendUs,
+  required int clientRecvUs,
+}) {
+  return ((serverRecvUs - clientSendUs) + (serverSendUs - clientRecvUs)) ~/ 2;
+}
+
+/// Capture stamp on the sender clock to display stamp on the receiver clock.
+int glassLatencyUs({
+  required int captureSenderUs,
+  required int displayReceiverUs,
+  required int offsetUs,
+}) {
+  return displayReceiverUs + offsetUs - captureSenderUs;
+}
+
+int clampStreamBitrateMbps(int value) => value.clamp(6, 20);
+
+class StreamTune {
+  const StreamTune({
+    required this.lowLatency,
+    required this.height,
+    required this.bitrateMbps,
+  });
+
+  final bool lowLatency;
+  final int height;
+  final int bitrateMbps;
+}
+
+StreamTune tuneForLatency(bool lowLatency) {
+  if (lowLatency) {
+    return const StreamTune(lowLatency: true, height: 720, bitrateMbps: 8);
+  }
+  return const StreamTune(lowLatency: false, height: 1080, bitrateMbps: 14);
+}
 
 int normalizeStreamHeight(int height) => height <= 720 ? 720 : 1080;
 

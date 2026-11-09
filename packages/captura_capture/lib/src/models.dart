@@ -176,11 +176,13 @@ class StreamingRequest {
     required this.enabled,
     required this.bitrateMbps,
     required this.height,
+    this.lowLatency = true,
   });
 
   final bool enabled;
   final int bitrateMbps;
   final int height;
+  final bool lowLatency;
 }
 
 class StreamStatusChanged extends CaptureEvent {

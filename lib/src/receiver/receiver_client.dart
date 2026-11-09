@@ -26,10 +26,15 @@ class ReceiverPhaseChanged extends ReceiverEvent {
 }
 
 class ReceiverStatsChanged extends ReceiverEvent {
-  const ReceiverStatsChanged({required this.fps, this.latencyMs});
+  const ReceiverStatsChanged({
+    required this.fps,
+    this.latencyMs,
+    this.dropped = 0,
+  });
 
   final double fps;
   final double? latencyMs;
+  final int dropped;
 }
 
 abstract class ReceiverClient {
@@ -110,9 +115,11 @@ ReceiverEvent? _decode(Object? raw) {
     case 'stats':
       final fps = map['fps'];
       final latency = map['latencyMs'];
+      final dropped = map['dropped'];
       return ReceiverStatsChanged(
         fps: fps is num ? fps.toDouble() : 0,
         latencyMs: latency is num ? latency.toDouble() : null,
+        dropped: dropped is num ? dropped.toInt() : 0,
       );
     default:
       return null;

@@ -7,8 +7,10 @@ void main() {
   test('um quadro sobrevive a cortes no meio do TCP', () {
     final frame = LanVideoFrame(
       keyframe: true,
+      sequence: 9,
       ptsUs: 1500,
       senderLatencyUs: 4200,
+      captureHostUs: 9000,
       nalus: Uint8List.fromList([0, 0, 0, 4, 9, 8, 7, 6]),
     );
     final bytes = LanFramer.encode(
@@ -21,8 +23,10 @@ void main() {
     expect(messages, hasLength(1));
     final decoded = LanVideoFrame.decode(messages.single.payload);
     expect(decoded.keyframe, isTrue);
+    expect(decoded.sequence, 9);
     expect(decoded.ptsUs, 1500);
     expect(decoded.senderLatencyUs, 4200);
+    expect(decoded.captureHostUs, 9000);
     expect(decoded.nalus, frame.nalus);
   });
 
@@ -88,9 +92,13 @@ void main() {
     expect(LanHello.decode(hello.encode()).features, hello.features);
 
     final ping = LanPing(123456789);
-    final pong = LanPong(clientTimeUs: ping.clientTimeUs, serverTimeUs: 50);
+    final pong = LanPong(
+      clientTimeUs: ping.clientTimeUs,
+      serverRecvUs: 5000,
+      serverSendUs: 5000,
+    );
     expect(LanPing.decode(ping.encode()).clientTimeUs, ping.clientTimeUs);
-    expect(LanPong.decode(pong.encode()).serverTimeUs, 50);
+    expect(LanPong.decode(pong.encode()).serverRecvUs, 5000);
 
     const input = LanInputReport(
       sequence: 7,
@@ -118,8 +126,29 @@ void main() {
     expect(parseManualEndpoint('fe80::1')?.host, 'fe80::1');
     expect(parseManualEndpoint('[fe80::1]:9')?.port, 9);
     expect(parseManualEndpoint('  '), isNull);
-    expect(clampStreamBitrateMbps(4), 10);
+    expect(clampStreamBitrateMbps(4), 6);
     expect(clampStreamBitrateMbps(30), 20);
+    expect(
+      clockOffsetUs(
+        clientSendUs: 1000,
+        serverRecvUs: 5000,
+        serverSendUs: 5000,
+        clientRecvUs: 1000,
+      ),
+      4000,
+    );
+    expect(
+      glassLatencyUs(
+        captureSenderUs: 6000,
+        displayReceiverUs: 2100,
+        offsetUs: 4000,
+      ),
+      100,
+    );
+    final tuned = tuneForLatency(true);
+    expect(tuned.height, 720);
+    expect(tuned.bitrateMbps, 8);
+    expect(tuneForLatency(false).height, 1080);
     expect(normalizeStreamHeight(480), 720);
     expect(normalizeStreamHeight(1080), 1080);
   });

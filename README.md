@@ -176,7 +176,9 @@ Na primeira vez o Xcode pede um time de assinatura. Abra `ios/Runner.xcworkspace
 
 O app abre deitado, sem barra de status, e procura o Mac sozinho. Se o Bonjour não aparecer, digite o IP do Mac. A permissão de rede local tem de ser aceita. Toque na imagem para ver os dados (fps e latência estimada) e para desconectar. Se a ligação cair, ele tenta de novo. A tela não apaga enquanto o receptor está aberto.
 
-A latência na tela do telefone é o tempo de encode no Mac mais metade do ping. Não é uma medida de vidro a vidro.
+O modo **Latência** (padrão) manda 720p a 8 Mb/s, com o encoder sem segurar quadro e um único quadro por vez no TCP. Se o Wi-Fi atrasar, o quadro velho é descartado e o próximo é um keyframe, em vez de a fila crescer. **Qualidade** sobe para 1080p a 14 Mb/s. Os dois toques ficam na barra depois de ligar a transmissão.
+
+O número no iPhone, “captura → tela”, é o instante em que o quadro saiu da captura no Mac até o instante em que entrou na tela do telefone, com o relógio alinhado por um ping no estilo NTP. Não é fotodiodo, mas dá para comparar antes e depois na mesma rede. “Descartes” conta quadros que não chegaram em sequência.
 
 O fio é TCP com mensagens `CPL1`: configuração H.264 (SPS/PPS) e quadros em AVCC, com tamanho de NAL de 4 bytes. O iPhone monta um `CMSampleBuffer` e entrega para um `AVSampleBufferDisplayLayer`, que decodifica e mostra sem passar pela textura do Flutter. Quadro atrasado é descartado, não enfileirado. Só um aparelho por vez: uma ligação nova substitui a anterior.
 

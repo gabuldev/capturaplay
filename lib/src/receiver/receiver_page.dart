@@ -64,6 +64,7 @@ class ReceiverController extends ChangeNotifier {
   String? detail;
   double? fps;
   double? latencyMs;
+  int droppedFrames = 0;
   bool showStats = false;
   bool chrome = true;
 
@@ -84,10 +85,12 @@ class ReceiverController extends ChangeNotifier {
         if (phase != 'connected') {
           fps = null;
           latencyMs = null;
+          droppedFrames = 0;
         }
-      case ReceiverStatsChanged(:final fps, :final latencyMs):
+      case ReceiverStatsChanged(:final fps, :final latencyMs, :final dropped):
         this.fps = fps;
         this.latencyMs = latencyMs;
+        droppedFrames = dropped;
     }
     notifyListeners();
   }
@@ -166,6 +169,7 @@ class _ReceiverPageState extends State<ReceiverPage> {
                   child: _Stats(
                     fps: controller.fps,
                     latencyMs: controller.latencyMs,
+                    dropped: controller.droppedFrames,
                   ),
                 ),
             ],
@@ -337,10 +341,15 @@ class _ConnectedChrome extends StatelessWidget {
 }
 
 class _Stats extends StatelessWidget {
-  const _Stats({required this.fps, required this.latencyMs});
+  const _Stats({
+    required this.fps,
+    required this.latencyMs,
+    required this.dropped,
+  });
 
   final double? fps;
   final double? latencyMs;
+  final int dropped;
 
   @override
   Widget build(BuildContext context) {
@@ -369,8 +378,12 @@ class _Stats extends StatelessWidget {
                 fontFeatures: [FontFeature.tabularFigures()],
               ),
             ),
+            Text(
+              'descartes $dropped',
+              style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
+            ),
             const Text(
-              'latência estimada',
+              'captura → tela',
               style: TextStyle(color: CapturaColors.muted, fontSize: 10),
             ),
           ],
