@@ -577,17 +577,19 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
     }
 
     private func frameDuration(for format: AVCaptureDevice.Format, fps: Int) -> CMTime {
+        // Use the device's own exact durations at the range edges: capture cards
+        // like the Cam Link report 59.94 fps (1001/60000), and setting a rounded
+        // 60 fps duration throws NSInvalidArgumentException.
         let requested = Double(fps)
-        var chosen = requested
-        if let range = format.videoSupportedFrameRateRanges.first(where: { requested >= $0.minFrameRate - 0.05 && requested <= $0.maxFrameRate + 0.05 }) {
-            chosen = min(max(requested, range.minFrameRate), range.maxFrameRate)
-        } else if let range = format.videoSupportedFrameRateRanges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) {
-            chosen = min(max(requested, range.minFrameRate), range.maxFrameRate)
-        }
-        guard chosen > 0 else {
+        let ranges = format.videoSupportedFrameRateRanges
+        guard let range = ranges.first(where: { requested >= $0.minFrameRate - 0.5 && requested <= $0.maxFrameRate + 0.5 })
+            ?? ranges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) else {
             return CMTime(value: 1, timescale: 60)
         }
-        return CMTime(seconds: 1.0 / chosen, preferredTimescale: 600)
+        let chosen = min(max(requested, range.minFrameRate), range.maxFrameRate)
+        if abs(chosen - range.maxFrameRate) < 0.5 { return range.minFrameDuration }
+        if abs(chosen - range.minFrameRate) < 0.5 { return range.maxFrameDuration }
+        return CMTime(value: 1000, timescale: CMTimeScale((chosen * 1000).rounded()))
     }
 
     private func describeActive(_ device: AVCaptureDevice) -> [String: Any] {
