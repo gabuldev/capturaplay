@@ -231,7 +231,7 @@ final class ReceiverHub {
         view.hub = self
         display = view
         if let lastKeyframe {
-            present(lastKeyframe, keyframe: true, captureHostUs: 0)
+            present(lastKeyframe, keyframe: true, captureHostUs: 0, flushBefore: true)
         }
     }
 
