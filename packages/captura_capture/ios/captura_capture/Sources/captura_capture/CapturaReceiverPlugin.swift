@@ -193,7 +193,7 @@ final class ReceiverHub {
         view.hub = self
         display = view
         if let lastKeyframe {
-            present(lastKeyframe, keyframe: true)
+            present(lastKeyframe, keyframe: true, captureHostUs: 0)
         }
     }
 
@@ -460,6 +460,7 @@ final class ReceiverHub {
     }
 
     private func noteDisplayed(captureHostUs: UInt64, displayedAt: UInt64) {
+        guard captureHostUs != 0 else { return } // re-shown cached keyframe: no timing data
         let now = CACurrentMediaTime()
         frameTimes.append(now)
         frameTimes.removeAll { now - $0 > 1 }
