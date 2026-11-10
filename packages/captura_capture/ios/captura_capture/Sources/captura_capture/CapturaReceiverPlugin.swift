@@ -1234,9 +1234,10 @@ private final class PixelDecoder {
             },
             decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
         )
-        let decoderSpec: [NSString: Any] = [
-            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true,
-        ]
+        var decoderSpec: [NSString: Any] = [:]
+        if #available(iOS 17.0, *) {
+            decoderSpec[kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder] = true
+        }
         var created: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
