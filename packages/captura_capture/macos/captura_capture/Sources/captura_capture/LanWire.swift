@@ -217,6 +217,7 @@ enum LanWire {
 enum UdpFlag {
     static let keyframe: UInt8 = 0x01
     static let timing: UInt8 = 0x02
+    static let keepalive: UInt8 = 0x40
     static let bind: UInt8 = 0x80
 }
 
@@ -242,6 +243,7 @@ struct UdpPacket {
     var payload: Data
 
     var isBind: Bool { flags & UdpFlag.bind != 0 }
+    var isKeepalive: Bool { flags & UdpFlag.keepalive != 0 }
     var keyframe: Bool { flags & UdpFlag.keyframe != 0 }
     var hasTiming: Bool { flags & UdpFlag.timing != 0 }
 }
@@ -260,7 +262,16 @@ enum LanUdp {
 
     static func isBind(_ data: Data) -> Bool {
         guard let parsed = parse(data) else { return false }
-        return parsed.isBind || parsed.fragCount == 0
+        return parsed.isBind
+    }
+
+    static func keepalivePacket() -> Data {
+        packet(flags: UdpFlag.keepalive, frameId: 0, fragIndex: 0, fragCount: 0, payload: Data())
+    }
+
+    static func isKeepalive(_ data: Data) -> Bool {
+        guard let parsed = parse(data) else { return false }
+        return parsed.isKeepalive
     }
 
     static func packets(frameId: UInt16, keyframe: Bool, timing: UdpTiming, nalus: Data) -> [Data] {
@@ -318,39 +329,52 @@ enum LanUdp {
 }
 
 final class UdpReassembler {
+    static let partialTimeout: TimeInterval = 0.008
+
     private var frameId: UInt16?
     private var count = 0
     private var parts: [Data?] = []
     private var keyframe = false
     private var timing: UdpTiming?
     private var got = 0
+    private var startedAt: TimeInterval?
+
+    /// Drops a partial frame that has sat longer than [partialTimeout].
+    /// A lost tail must not wait for the next beacon or the next keyframe.
+    func expire(now: TimeInterval) -> Bool {
+        guard let startedAt, frameId != nil, got != count else { return false }
+        guard now - startedAt >= Self.partialTimeout else { return false }
+        reset()
+        return true
+    }
 
     /// Completed frame, and whether the previous partial frame was discarded.
-    func add(_ data: Data) -> (frame: UdpAssembled?, droppedIncomplete: Bool) {
+    func add(_ data: Data, now: TimeInterval) -> (frame: UdpAssembled?, droppedIncomplete: Bool) {
         guard let packet = LanUdp.parse(data) else { return (nil, false) }
-        if packet.isBind || packet.fragCount == 0 { return (nil, false) }
+        if packet.isBind || packet.isKeepalive || packet.fragCount == 0 { return (nil, false) }
         guard packet.fragIndex < packet.fragCount else { return (nil, false) }
         if let current = frameId, packet.frameId != current {
             let ahead = UInt16(truncatingIfNeeded: Int(packet.frameId) &- Int(current))
             if ahead == 0 || ahead >= 0x8000 { return (nil, false) }
             let dropped = got != count
             reset()
-            start(packet)
+            start(packet, now: now)
             let done = store(packet)
             return (done, dropped)
         }
-        if frameId == nil { start(packet) }
+        if frameId == nil { start(packet, now: now) }
         guard packet.fragCount == count else { return (nil, false) }
         return (store(packet), false)
     }
 
-    private func start(_ packet: UdpPacket) {
+    private func start(_ packet: UdpPacket, now: TimeInterval) {
         frameId = packet.frameId
         count = Int(packet.fragCount)
         parts = Array(repeating: nil, count: count)
         keyframe = packet.keyframe
         got = 0
         timing = nil
+        startedAt = now
     }
 
     private func store(_ packet: UdpPacket) -> UdpAssembled? {
@@ -388,6 +412,7 @@ final class UdpReassembler {
         got = 0
         timing = nil
         keyframe = false
+        startedAt = nil
     }
 }
 

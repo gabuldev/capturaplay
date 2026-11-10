@@ -161,6 +161,7 @@ CaptureEvent? eventFrom(Object? raw) {
         clients: asInt(map['clients']),
         error: asOptionalString(map['error']),
         port: asInt(map['port']),
+        hint: asOptionalString(map['hint']),
       );
     default:
       return null;

@@ -36,6 +36,7 @@ class StudioController extends ChangeNotifier {
   bool lowLatency = true;
   bool smoothPlayback = true;
   int streamClients = 0;
+  String? streamHint;
   String? streamError;
 
   String? preferredVideoId;
@@ -178,10 +179,12 @@ class StudioController extends ChangeNotifier {
 
   String get streamStatusLabel {
     if (streamError != null) return streamError!;
-    if (streamClients > 0) {
-      return 'Na rede · iPhone ligado · $streamBitrateMbps Mb/s';
-    }
-    return 'Na rede · à espera do iPhone · porta ${LanLimits.port}';
+    final base = streamClients > 0
+        ? 'Na rede · iPhone ligado · $streamBitrateMbps Mb/s'
+        : 'Na rede · à espera do iPhone · porta ${LanLimits.port}';
+    final hint = streamHint;
+    if (hint == null) return base;
+    return '$base · $hint';
   }
 
   Future<void> openPrivacySettings() => client.openPrivacySettings();
@@ -320,9 +323,15 @@ class StudioController extends ChangeNotifier {
       case FullScreenChanged(:final fullscreen):
         this.fullscreen = fullscreen;
         notifyListeners();
-      case StreamStatusChanged(:final enabled, :final clients, :final error):
+      case StreamStatusChanged(
+        :final enabled,
+        :final clients,
+        :final error,
+        :final hint,
+      ):
         streamClients = clients;
         streamError = error;
+        streamHint = hint;
         if (!enabled && error != null) streaming = false;
         notifyListeners();
     }

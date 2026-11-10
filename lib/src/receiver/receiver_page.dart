@@ -81,6 +81,13 @@ class ReceiverController extends ChangeNotifier {
   double offsetMs = 0;
   double rttMs = 0;
   bool clockSkew = false;
+  double latP50Ms = -1;
+  double latP95Ms = -1;
+  double latMaxMs = -1;
+  int spikeCount = 0;
+  String spikeStage = '';
+  String digest = '';
+  String linkHint = '';
   bool showStats = false;
   bool smooth = true;
   bool chrome = true;
@@ -119,6 +126,13 @@ class ReceiverController extends ChangeNotifier {
           offsetMs = 0;
           rttMs = 0;
           clockSkew = false;
+          latP50Ms = -1;
+          latP95Ms = -1;
+          latMaxMs = -1;
+          spikeCount = 0;
+          spikeStage = '';
+          digest = '';
+          linkHint = '';
         }
       case ReceiverStatsChanged(
         :final fps,
@@ -140,6 +154,13 @@ class ReceiverController extends ChangeNotifier {
         :final offsetMs,
         :final rttMs,
         :final clockSkew,
+        :final latP50Ms,
+        :final latP95Ms,
+        :final latMaxMs,
+        :final spikeCount,
+        :final spikeStage,
+        :final digest,
+        :final linkHint,
       ):
         this.fps = fps;
         this.displayedFps = displayedFps;
@@ -160,6 +181,13 @@ class ReceiverController extends ChangeNotifier {
         this.offsetMs = offsetMs;
         this.rttMs = rttMs;
         this.clockSkew = clockSkew;
+        this.latP50Ms = latP50Ms;
+        this.latP95Ms = latP95Ms;
+        this.latMaxMs = latMaxMs;
+        this.spikeCount = spikeCount;
+        this.spikeStage = spikeStage;
+        this.digest = digest;
+        this.linkHint = linkHint;
     }
     notifyListeners();
   }
@@ -261,6 +289,13 @@ class _ReceiverPageState extends State<ReceiverPage> {
                     offsetMs: controller.offsetMs,
                     rttMs: controller.rttMs,
                     clockSkew: controller.clockSkew,
+                    latP50Ms: controller.latP50Ms,
+                    latP95Ms: controller.latP95Ms,
+                    latMaxMs: controller.latMaxMs,
+                    spikeCount: controller.spikeCount,
+                    spikeStage: controller.spikeStage,
+                    digest: controller.digest,
+                    linkHint: controller.linkHint,
                   ),
                 ),
             ],
@@ -469,6 +504,13 @@ class _Stats extends StatelessWidget {
     required this.offsetMs,
     required this.rttMs,
     required this.clockSkew,
+    required this.latP50Ms,
+    required this.latP95Ms,
+    required this.latMaxMs,
+    required this.spikeCount,
+    required this.spikeStage,
+    required this.digest,
+    required this.linkHint,
   });
 
   final double? fps;
@@ -490,6 +532,13 @@ class _Stats extends StatelessWidget {
   final double offsetMs;
   final double rttMs;
   final bool clockSkew;
+  final double latP50Ms;
+  final double latP95Ms;
+  final double latMaxMs;
+  final int spikeCount;
+  final String spikeStage;
+  final String digest;
+  final String linkHint;
 
   @override
   Widget build(BuildContext context) {
@@ -525,6 +574,30 @@ class _Stats extends StatelessWidget {
                 fontFeatures: [FontFeature.tabularFigures()],
               ),
             ),
+            Text(
+              'p50 ${_ms(latP50Ms)} · p95 ${_ms(latP95Ms)} · max ${_ms(latMaxMs)}',
+              style: const TextStyle(color: CapturaColors.ink, fontSize: 10),
+            ),
+            Text(
+              'picos>50 $spikeCount${spikeStage.isEmpty ? '' : ' · $spikeStage'}',
+              style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
+            ),
+            if (digest.isNotEmpty)
+              Text(
+                digest,
+                style: const TextStyle(
+                  color: CapturaColors.muted,
+                  fontSize: 10,
+                ),
+              ),
+            if (linkHint.isNotEmpty)
+              Text(
+                linkHint,
+                style: const TextStyle(
+                  color: CapturaColors.brass,
+                  fontSize: 10,
+                ),
+              ),
             Text(
               'rede $dropped · tela $receiverDrops · buffer $bufferDepth',
               style: const TextStyle(color: CapturaColors.muted, fontSize: 10),

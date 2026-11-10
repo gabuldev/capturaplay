@@ -40,7 +40,7 @@ public final class CapturaCapturePlugin: NSObject, FlutterPlugin, FlutterStreamH
         self.engine = engine
         super.init()
         engine.delegate = self
-        sender.onStatus = { [weak self] enabled, clients, error in
+        sender.onStatus = { [weak self] enabled, clients, error, hint in
             var event: [String: Any] = [
                 "type": "stream",
                 "enabled": enabled,
@@ -48,6 +48,7 @@ public final class CapturaCapturePlugin: NSObject, FlutterPlugin, FlutterStreamH
                 "port": Int(LanLimits.port),
             ]
             event["error"] = error ?? NSNull()
+            event["hint"] = hint ?? NSNull()
             self?.eventSink?(event)
         }
     }

@@ -304,6 +304,7 @@ class UdpDatagram {
   static const datagramSize = 1200;
   static const keyframeFlag = 0x01;
   static const timingFlag = 0x02;
+  static const keepaliveFlag = 0x40;
   static const bindFlag = 0x80;
   static const magic = [0x43, 0x50, 0x4C, 0x55];
 
@@ -314,6 +315,7 @@ class UdpDatagram {
   final Uint8List payload;
 
   bool get isBind => flags & bindFlag != 0;
+  bool get isKeepalive => flags & keepaliveFlag != 0;
   bool get keyframe => flags & keyframeFlag != 0;
   bool get hasTiming => flags & timingFlag != 0;
 
@@ -477,7 +479,7 @@ class UdpReassembler {
 
   UdpIngest add(Uint8List datagram) {
     final packet = UdpDatagram.decode(datagram);
-    if (packet.isBind || packet.fragCount == 0) {
+    if (packet.isBind || packet.isKeepalive || packet.fragCount == 0) {
       return const UdpIngest(ignored: true);
     }
     if (packet.fragIndex >= packet.fragCount) {
@@ -797,6 +799,103 @@ StreamTune tuneForLatency(bool lowLatency) {
 }
 
 int normalizeStreamHeight(int height) => height <= 720 ? 720 : 1080;
+
+/// A partial UDP frame older than this is discarded. Same value as
+/// `UdpReassembler.partialTimeout` in LanWire.swift.
+const udpPartialTimeoutUs = 8000;
+
+bool udpPartialExpired({required int ageUs}) => ageUs >= udpPartialTimeoutUs;
+
+/// Nearest rank. `LanWire`'s StageWindow uses the same rounding.
+int percentileNearest(List<int> values, double p) {
+  if (values.isEmpty) return -1;
+  final sorted = [...values]..sort();
+  final rank = ((sorted.length - 1) * p).round();
+  final index = rank < 0
+      ? 0
+      : (rank >= sorted.length ? sorted.length - 1 : rank);
+  return sorted[index];
+}
+
+/// The stage that contributed the most of a late frame.
+String dominantStage({
+  required int captureUs,
+  required int encodeUs,
+  required int queueUs,
+  required int networkUs,
+  required int decodeUs,
+  required int glassUs,
+}) {
+  final stages = <String, int>{
+    'cap': captureUs,
+    'enc': encodeUs,
+    'tx': queueUs,
+    'rede': networkUs,
+    'dec': decodeUs,
+    'vidro': glassUs,
+  };
+  var name = 'rede';
+  var best = -1 << 60;
+  for (final entry in stages.entries) {
+    if (entry.value > best) {
+      best = entry.value;
+      name = entry.key;
+    }
+  }
+  return name;
+}
+
+class LatencySummary {
+  const LatencySummary({
+    required this.p50Us,
+    required this.p95Us,
+    required this.maxUs,
+    required this.spikeCount,
+    required this.spikeStage,
+  });
+
+  final int p50Us;
+  final int p95Us;
+  final int maxUs;
+  final int spikeCount;
+  final String spikeStage;
+}
+
+/// Keeps about two seconds of capture→glass samples.
+class LatencyWindow {
+  static const horizonUs = 2000000;
+  static const spikeUs = 50000;
+
+  final List<(int, int, String)> _samples = [];
+
+  void add({required int nowUs, required int totalUs, required String stage}) {
+    _samples.add((nowUs, totalUs, stage));
+    _samples.removeWhere((sample) => nowUs - sample.$1 > horizonUs);
+  }
+
+  LatencySummary summarize() {
+    final totals = [for (final sample in _samples) sample.$2];
+    final spikes = [
+      for (final sample in _samples)
+        if (sample.$2 > spikeUs) sample.$3,
+    ];
+    var stage = '';
+    if (spikes.isNotEmpty) {
+      final counts = <String, int>{};
+      for (final name in spikes) {
+        counts[name] = (counts[name] ?? 0) + 1;
+      }
+      stage = counts.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+    }
+    return LatencySummary(
+      p50Us: percentileNearest(totals, 0.50),
+      p95Us: percentileNearest(totals, 0.95),
+      maxUs: percentileNearest(totals, 1),
+      spikeCount: spikes.length,
+      spikeStage: stage,
+    );
+  }
+}
 
 class ManualEndpoint {
   const ManualEndpoint(this.host, this.port);

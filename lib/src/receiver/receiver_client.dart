@@ -46,6 +46,13 @@ class ReceiverStatsChanged extends ReceiverEvent {
     this.offsetMs = 0,
     this.rttMs = 0,
     this.clockSkew = false,
+    this.latP50Ms = -1,
+    this.latP95Ms = -1,
+    this.latMaxMs = -1,
+    this.spikeCount = 0,
+    this.spikeStage = '',
+    this.digest = '',
+    this.linkHint = '',
   });
 
   final double fps;
@@ -67,6 +74,13 @@ class ReceiverStatsChanged extends ReceiverEvent {
   final double offsetMs;
   final double rttMs;
   final bool clockSkew;
+  final double latP50Ms;
+  final double latP95Ms;
+  final double latMaxMs;
+  final int spikeCount;
+  final String spikeStage;
+  final String digest;
+  final String linkHint;
 }
 
 abstract class ReceiverClient {
@@ -171,6 +185,13 @@ ReceiverEvent? _decode(Object? raw) {
       final offsetMs = map['offsetMs'];
       final rttMs = map['rttMs'];
       final clockSkew = map['clockSkew'];
+      final latP50Ms = map['latP50Ms'];
+      final latP95Ms = map['latP95Ms'];
+      final latMaxMs = map['latMaxMs'];
+      final spikeCount = map['spikeCount'];
+      final spikeStage = map['spikeStage'];
+      final digest = map['digest'];
+      final linkHint = map['linkHint'];
       return ReceiverStatsChanged(
         fps: fps is num ? fps.toDouble() : 0,
         displayedFps: displayed is num ? displayed.toDouble() : null,
@@ -191,6 +212,13 @@ ReceiverEvent? _decode(Object? raw) {
         offsetMs: offsetMs is num ? offsetMs.toDouble() : 0,
         rttMs: rttMs is num ? rttMs.toDouble() : 0,
         clockSkew: clockSkew == 1 || clockSkew == true,
+        latP50Ms: latP50Ms is num ? latP50Ms.toDouble() : -1,
+        latP95Ms: latP95Ms is num ? latP95Ms.toDouble() : -1,
+        latMaxMs: latMaxMs is num ? latMaxMs.toDouble() : -1,
+        spikeCount: spikeCount is num ? spikeCount.toInt() : 0,
+        spikeStage: spikeStage is String ? spikeStage : '',
+        digest: digest is String ? digest : '',
+        linkHint: linkHint is String ? linkHint : '',
       );
     default:
       return null;

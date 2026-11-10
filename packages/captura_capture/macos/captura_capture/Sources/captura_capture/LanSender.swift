@@ -12,7 +12,7 @@ private let lanLog = Logger(subsystem: "dev.capturaplay.capturaplay", category: 
 /// separate queue; if that queue is busy the frame is dropped instead of
 /// being buffered.
 final class LanSender: NSObject, CaptureMediaSink {
-    var onStatus: ((Bool, Int, String?) -> Void)?
+    var onStatus: ((Bool, Int, String?, String?) -> Void)?
 
     private let encodeQueue = DispatchQueue(label: "dev.capturaplay.lan.encode", qos: .userInteractive)
     private let networkQueue = DispatchQueue(label: "dev.capturaplay.lan.net", qos: .userInteractive)
@@ -23,6 +23,13 @@ final class LanSender: NSObject, CaptureMediaSink {
     private var connection: NWConnection?
     private var udpPeer: NWConnection?
     private var lastStageLog = CFTimeInterval(0)
+    private var lastVideoSend = CFTimeInterval(0)
+    private var keepalive: DispatchSourceTimer?
+    private var pathMonitor: NWPathMonitor?
+    private var awdlUp = false
+    private var txGapUntil = CFTimeInterval(0)
+    private var statusHint: String?
+    private var listeningClients = 0
     private var parser = LanStreamParser()
     private var pendingSends = 0
     private var dropUntilKeyframe = false
@@ -94,6 +101,8 @@ final class LanSender: NSObject, CaptureMediaSink {
                 listener.start(queue: self.networkQueue)
                 self.listener = listener
                 self.startUdpListener()
+                self.startPathMonitor()
+                self.startKeepalive()
             } catch {
                 lanLog.error("Não abriu a porta \(LanLimits.port, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 self.publish(enabled: false, clients: 0, error: "Não foi possível abrir a porta \(LanLimits.port).")
@@ -112,6 +121,12 @@ final class LanSender: NSObject, CaptureMediaSink {
             self.listener = nil
             self.udpListener?.cancel()
             self.udpListener = nil
+            self.keepalive?.cancel()
+            self.keepalive = nil
+            self.pathMonitor?.cancel()
+            self.pathMonitor = nil
+            self.awdlUp = false
+            self.statusHint = nil
             self.parser.reset()
             self.pendingSends = 0
             self.stateLock.lock()
@@ -231,7 +246,7 @@ final class LanSender: NSObject, CaptureMediaSink {
         }
         let bitrate = self.bitrate
         let smooth = self.isSmooth()
-        let interval = smooth ? 120 : 30
+        let interval = smooth ? 120 : 8
         let profile = smooth
             ? kVTProfileLevel_H264_High_AutoLevel
             : kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
@@ -242,7 +257,7 @@ final class LanSender: NSObject, CaptureMediaSink {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: interval as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: (smooth ? 2.0 : 0.5) as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: (smooth ? 2.0 : 0.15) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
         let maxQP = smooth ? 32 : 38
@@ -432,6 +447,7 @@ final class LanSender: NSObject, CaptureMediaSink {
             guard let self else { return }
             switch state {
             case .ready:
+                self.markInteractive(connection)
                 self.requestKeyframe()
                 self.send(LanWire.helloAck(features: LanFeatures.video | LanFeatures.udp), important: true)
                 self.send(LanWire.transport(udp: false), important: true)
@@ -518,6 +534,7 @@ final class LanSender: NSObject, CaptureMediaSink {
     ) {
         networkQueue.async {
             let sendUs = Self.hostUs()
+            self.noteSendGap()
             self.logSenderStages(captureUs: captureHostUs, encoderInUs: encoderInUs, encoderOutUs: encoderOutUs, sendUs: sendUs)
             if self.isSmooth() {
                 let message = LanWire.videoFrame(
@@ -555,6 +572,7 @@ final class LanSender: NSObject, CaptureMediaSink {
                 encoderOutUs: encoderOutUs,
                 sendUs: sendUs
             )
+            self.markInteractive(peer)
             for packet in LanUdp.packets(frameId: sequence, keyframe: keyframe, timing: timing, nalus: nalus) {
                 peer.send(content: packet, completion: .idempotent)
             }
@@ -625,7 +643,12 @@ final class LanSender: NSObject, CaptureMediaSink {
     }
 
     private func acceptUdp(_ connection: NWConnection) {
-        connection.stateUpdateHandler = { _ in }
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .ready = state {
+                self.markInteractive(connection)
+            }
+        }
         connection.start(queue: networkQueue)
         receiveUdp(on: connection)
     }
@@ -639,6 +662,7 @@ final class LanSender: NSObject, CaptureMediaSink {
                     self.udpPeer = connection
                 }
                 lanLog.info("iPhone abriu o UDP")
+                self.markInteractive(connection)
                 let udp = !self.isSmooth()
                 self.writeTcp(LanWire.transport(udp: udp), important: true, isKeyframe: false)
                 self.requestKeyframe()
@@ -694,8 +718,73 @@ final class LanSender: NSObject, CaptureMediaSink {
     }
 
     private func publish(enabled: Bool, clients: Int, error: String?) {
+        listeningClients = clients
+        let hint = statusHint
         DispatchQueue.main.async { [weak self] in
-            self?.onStatus?(enabled, clients, error)
+            self?.onStatus?(enabled, clients, error, hint)
+        }
+    }
+
+    private func noteSendGap() {
+        let now = CACurrentMediaTime()
+        if lastVideoSend > 0 {
+            let gapMs = (now - lastVideoSend) * 1000
+            if gapMs > 50 {
+                lanLog.info("intervalo de envio \(Int(gapMs), privacy: .public)ms — o Mac segurou o quadro antes do socket (AWDL/AirDrop costuma ser ~100ms)")
+                txGapUntil = now + 5
+                refreshHint()
+            }
+        }
+        lastVideoSend = now
+    }
+
+    private func startKeepalive() {
+        guard keepalive == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
+        timer.schedule(deadline: .now() + .milliseconds(4), repeating: .milliseconds(4))
+        timer.setEventHandler { [weak self] in
+            guard let self, let peer = self.udpPeer, !self.isSmooth() else { return }
+            peer.send(content: LanUdp.keepalivePacket(), completion: .idempotent)
+        }
+        timer.resume()
+        keepalive = timer
+    }
+
+    private func startPathMonitor() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let awdl = path.availableInterfaces.contains { $0.name == "awdl0" }
+            self.awdlUp = awdl
+            if awdl {
+                lanLog.info("awdl0 está na lista de interfaces. AirDrop/Continuity/Sidecar podem tirar o rádio do canal por ~100 ms. O app não desliga isso.")
+            }
+            self.refreshHint()
+        }
+        monitor.start(queue: networkQueue)
+        pathMonitor = monitor
+    }
+
+    private func refreshHint() {
+        let now = CACurrentMediaTime()
+        let next: String?
+        if now < txGapUntil {
+            next = awdlUp
+                ? "Envio pausou ~100 ms. AWDL (AirDrop) está ativo — desligue o AirDrop."
+                : "Envio pausou ~100 ms antes do socket."
+        } else {
+            next = nil
+        }
+        guard next != statusHint else { return }
+        statusHint = next
+        publish(enabled: listening, clients: listeningClients, error: nil)
+    }
+
+    private func markInteractive(_ connection: NWConnection) {
+        let metadata = connection.metadata(definition: NWProtocolIP.definition)
+        if let ip = metadata as? NWProtocolIP.Metadata {
+            ip.serviceClass = .interactiveVideo
         }
     }
 }

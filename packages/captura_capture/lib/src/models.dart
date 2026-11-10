@@ -195,10 +195,12 @@ class StreamStatusChanged extends CaptureEvent {
     required this.clients,
     this.error,
     this.port = 0,
+    this.hint,
   });
 
   final bool enabled;
   final int clients;
   final String? error;
   final int port;
+  final String? hint;
 }

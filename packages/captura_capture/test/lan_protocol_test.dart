@@ -307,5 +307,38 @@ void main() {
     expect(UdpDatagram.decode(udpBindDatagram()).isBind, isTrue);
     expect(LanType.keyframeRequest, 0x12);
     expect(LanType.transport, 0x14);
+
+    final keepalive = UdpDatagram(
+      flags: UdpDatagram.keepaliveFlag,
+      frameId: 0,
+      fragIndex: 0,
+      fragCount: 0,
+      payload: Uint8List(0),
+    );
+    expect(UdpReassembler().add(keepalive.encode()).ignored, isTrue);
+    expect(udpPartialExpired(ageUs: 7999), isFalse);
+    expect(udpPartialExpired(ageUs: 8000), isTrue);
+    expect(percentileNearest(const [10, 20, 30, 40, 100], 0.50), 30);
+    expect(percentileNearest(const [10, 20, 30, 40, 100], 0.95), 100);
+    expect(
+      dominantStage(
+        captureUs: 1,
+        encodeUs: 2,
+        queueUs: 0,
+        networkUs: 90,
+        decodeUs: 3,
+        glassUs: 4,
+      ),
+      'rede',
+    );
+    final window = LatencyWindow()
+      ..add(nowUs: 0, totalUs: 20000, stage: 'enc')
+      ..add(nowUs: 16000, totalUs: 90000, stage: 'rede')
+      ..add(nowUs: 32000, totalUs: 30000, stage: 'enc');
+    final summary = window.summarize();
+    expect(summary.p50Us, 30000);
+    expect(summary.maxUs, 90000);
+    expect(summary.spikeCount, 1);
+    expect(summary.spikeStage, 'rede');
   });
 }

@@ -161,6 +161,12 @@ final class ReceiverHub {
     private var remoteUltra = false
     private let pixelDecoder = PixelDecoder()
     private var lastKeyframeAsk = CFTimeInterval(0)
+    private var keepalive: DispatchSourceTimer?
+    private let showLock = NSLock()
+    private var showToken: UInt64 = 0
+    private var stageWindow = StageWindow()
+    private var spikeLogs = 0
+    private var spikeLogSecond = CFTimeInterval(0)
     private var parser = LanStreamParser()
     private var endpoints: [String: NWEndpoint] = [:]
     private var desired: NWEndpoint?
@@ -346,6 +352,7 @@ final class ReceiverHub {
     private func handle(_ state: NWConnection.State, connection: NWConnection) {
         switch state {
         case .ready:
+            markInteractive(connection)
             parser.reset()
             send(LanWire.hello(features: LanFeatures.video), on: connection)
             receive(on: connection)
@@ -376,6 +383,8 @@ final class ReceiverHub {
         connection = nil
         udpConnection?.cancel()
         udpConnection = nil
+        keepalive?.cancel()
+        keepalive = nil
         udpReassembler = UdpReassembler()
         remoteUltra = false
         pixelDecoder.invalidate()
@@ -681,6 +690,27 @@ final class ReceiverHub {
         if latencyUs > 0 && latencyUs < 2_000_000 {
             lastLatencyMs = Double(latencyUs) / 1000.0
         }
+        let sample = StageSample(
+            total: latencyUs,
+            cap: stageCaptureUs,
+            enc: stageEncodeUs,
+            tx: stageQueueUs,
+            net: stageNetworkUs,
+            dec: stageDecodeUs,
+            glass: stageGlassUs
+        )
+        stageWindow.add(now: now, sample: sample)
+        if latencyUs > 50_000 {
+            if now - spikeLogSecond >= 1 {
+                spikeLogSecond = now
+                spikeLogs = 0
+            }
+            if spikeLogs < 8 {
+                spikeLogs += 1
+                let who = StageWindow.dominant(sample)
+                lanLog.info("pico \(latencyUs / 1000, privacy: .public)ms \(who, privacy: .public) cap \(self.stageCaptureUs / 1000, privacy: .public) enc \(self.stageEncodeUs / 1000, privacy: .public) tx \(self.stageQueueUs / 1000, privacy: .public) rede \(self.stageNetworkUs / 1000, privacy: .public) dec \(self.stageDecodeUs / 1000, privacy: .public) vidro \(self.stageGlassUs / 1000, privacy: .public)")
+            }
+        }
         if now - lastStageLog >= 1 {
             lastStageLog = now
             let suspect = clockSuspect ? 1 : 0
@@ -838,10 +868,21 @@ final class ReceiverHub {
 
     private func decodeAndShow(_ sample: CMSampleBuffer, timing: FrameTiming) {
         let submit = Self.nowUs()
+        showLock.lock()
+        showToken &+= 1
+        let token = showToken
+        showLock.unlock()
         let status = pixelDecoder.decode(sample) { [weak self] buffer in
             let decoded = Self.nowUs()
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                self.showLock.lock()
+                let latest = self.showToken
+                self.showLock.unlock()
+                guard token == latest else {
+                    self.queue.async { self.displayDrops += 1 }
+                    return
+                }
                 self.display?.showPixel(buffer)
                 let glassUs = self.predictedGlassUs()
                 self.queue.async {
@@ -865,7 +906,7 @@ final class ReceiverHub {
 
     private func askKeyframe() {
         let now = CACurrentMediaTime()
-        guard now - lastKeyframeAsk > 0.1, let connection else { return }
+        guard now - lastKeyframeAsk > 0.05, let connection else { return }
         lastKeyframeAsk = now
         send(LanWire.keyframeRequest(), on: connection)
     }
@@ -882,8 +923,10 @@ final class ReceiverHub {
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             if case .ready = state {
+                self.markInteractive(connection)
                 connection.send(content: LanUdp.bindPacket(), completion: .idempotent)
                 self.receiveUdp(on: connection)
+                self.startKeepalive()
             }
         }
         connection.start(queue: queue)
@@ -903,7 +946,14 @@ final class ReceiverHub {
     }
 
     private func ingestUdp(_ data: Data) {
-        let result = udpReassembler.add(data)
+        if LanUdp.isKeepalive(data) || LanUdp.isBind(data) { return }
+        let now = CACurrentMediaTime()
+        if udpReassembler.expire(now: now) {
+            awaitingKeyframe = true
+            waitingForKeyframe += 1
+            askKeyframe()
+        }
+        let result = udpReassembler.add(data, now: now)
         if result.droppedIncomplete {
             awaitingKeyframe = true
             waitingForKeyframe += 1
@@ -924,6 +974,30 @@ final class ReceiverHub {
             ),
             direct: true
         )
+    }
+
+    private func startKeepalive() {
+        guard keepalive == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + .milliseconds(4), repeating: .milliseconds(4))
+        timer.setEventHandler { [weak self] in
+            guard let self, let connection = self.udpConnection, connection.state == .ready else { return }
+            connection.send(content: LanUdp.keepalivePacket(), completion: .idempotent)
+            if self.udpReassembler.expire(now: CACurrentMediaTime()) {
+                self.awaitingKeyframe = true
+                self.waitingForKeyframe += 1
+                self.askKeyframe()
+            }
+        }
+        timer.resume()
+        keepalive = timer
+    }
+
+    private func markInteractive(_ connection: NWConnection) {
+        let metadata = connection.metadata(definition: NWProtocolIP.definition)
+        if let ip = metadata as? NWProtocolIP.Metadata {
+            ip.serviceClass = .interactiveVideo
+        }
     }
 
     private func udpParameters() -> NWParameters {
@@ -958,6 +1032,15 @@ final class ReceiverHub {
             "offsetMs": Double(clockOffsetUs) / 1000.0,
             "rttMs": Double(rttUs) / 1000.0,
             "clockSkew": clockSuspect ? 1 : 0,
+            "latP50Ms": Self.ms(stageWindow.percentile(\.total, 0.50)),
+            "latP95Ms": Self.ms(stageWindow.percentile(\.total, 0.95)),
+            "latMaxMs": Self.ms(stageWindow.percentile(\.total, 1)),
+            "spikeCount": stageWindow.spikeCount,
+            "spikeStage": stageWindow.spikeStage,
+            "digest": stageWindow.digest,
+            "linkHint": stageWindow.percentile(\.net, 0.95) >= 80_000
+                ? "Pico na rede ~100 ms: Wi-Fi dormindo ou AWDL no Mac"
+                : "",
         ])
     }
 
@@ -1052,6 +1135,75 @@ private final class DisplayPacer: NSObject {
     }
 }
 
+private struct StageSample {
+    var total: Int64
+    var cap: Int64
+    var enc: Int64
+    var tx: Int64
+    var net: Int64
+    var dec: Int64
+    var glass: Int64
+}
+
+/// Same nearest-rank percentile as `percentileNearest` in lan_protocol.dart.
+private struct StageWindow {
+    private var samples: [(t: CFTimeInterval, s: StageSample)] = []
+
+    mutating func add(now: CFTimeInterval, sample: StageSample) {
+        samples.append((now, sample))
+        samples.removeAll { now - $0.t > 2 }
+    }
+
+    func percentile(_ key: KeyPath<StageSample, Int64>, _ p: Double) -> Int64 {
+        let values = samples.map { $0.s[keyPath: key] }
+        return Self.nearest(values, p)
+    }
+
+    var spikeCount: Int {
+        samples.reduce(0) { $0 + ($1.s.total > 50_000 ? 1 : 0) }
+    }
+
+    var spikeStage: String {
+        var counts: [String: Int] = [:]
+        for entry in samples where entry.s.total > 50_000 {
+            let name = Self.dominant(entry.s)
+            counts[name, default: 0] += 1
+        }
+        return counts.max { $0.value < $1.value }?.key ?? ""
+    }
+
+    var digest: String {
+        guard !samples.isEmpty else { return "" }
+        func triple(_ key: KeyPath<StageSample, Int64>) -> String {
+            let p50 = percentile(key, 0.50) / 1000
+            let p95 = percentile(key, 0.95) / 1000
+            let max = percentile(key, 1) / 1000
+            return "\(p50)/\(p95)/\(max)"
+        }
+        return "cap \(triple(\.cap)) enc \(triple(\.enc)) tx \(triple(\.tx)) rede \(triple(\.net)) dec \(triple(\.dec)) vidro \(triple(\.glass))"
+    }
+
+    static func dominant(_ sample: StageSample) -> String {
+        let stages: [(String, Int64)] = [
+            ("cap", sample.cap),
+            ("enc", sample.enc),
+            ("tx", sample.tx),
+            ("rede", sample.net),
+            ("dec", sample.dec),
+            ("vidro", sample.glass),
+        ]
+        return stages.max { $0.1 < $1.1 }?.0 ?? "rede"
+    }
+
+    private static func nearest(_ values: [Int64], _ p: Double) -> Int64 {
+        guard !values.isEmpty else { return -1 }
+        let sorted = values.sorted()
+        let rank = Int((Double(sorted.count - 1) * p).rounded())
+        let index = min(max(rank, 0), sorted.count - 1)
+        return sorted[index]
+    }
+}
+
 private final class PixelDecoder {
     var onBuffer: ((CVPixelBuffer) -> Void)?
     private var session: VTDecompressionSession?
@@ -1096,13 +1248,13 @@ private final class PixelDecoder {
     func decode(_ sample: CMSampleBuffer, onImage: @escaping (CVPixelBuffer) -> Void) -> OSStatus {
         guard let session else { return -1 }
         onBuffer = onImage
-        var flags = VTDecodeInfoFlags()
+        var infoFlags = VTDecodeInfoFlags()
         return VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sample,
             flags: [],
             frameRefcon: nil,
-            infoFlagsOut: &flags
+            infoFlagsOut: &infoFlags
         )
     }
 
