@@ -171,6 +171,10 @@ void main() {
     expect(tuned.height, 720);
     expect(tuned.bitrateMbps, 15);
     expect(tuneForLatency(false).height, 1080);
+    expect(bitrateForUltraHeight(height: 720, bitrateMbps: 10), 10);
+    expect(bitrateForUltraHeight(height: 1080, bitrateMbps: 20), 12);
+    expect(bitrateForUltraHeight(height: 1080, bitrateMbps: 10), 10);
+    expect(bitrateForUltraHeight(height: 1080, bitrateMbps: 15), 15);
     expect(
       decideFrameSend(
         smooth: true,

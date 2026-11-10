@@ -140,12 +140,24 @@ class StudioController extends ChangeNotifier {
 
   Future<void> chooseStreamHeight(int height) async {
     streamHeight = normalizeStreamHeight(height);
+    if (!smoothPlayback) {
+      streamBitrateMbps = bitrateForUltraHeight(
+        height: streamHeight,
+        bitrateMbps: streamBitrateMbps,
+      );
+    }
     await _pushStreaming();
     notifyListeners();
   }
 
   Future<void> chooseSmooth(bool smooth) async {
     smoothPlayback = smooth;
+    if (!smooth) {
+      streamBitrateMbps = bitrateForUltraHeight(
+        height: streamHeight,
+        bitrateMbps: streamBitrateMbps,
+      );
+    }
     await _pushStreaming();
     notifyListeners();
   }

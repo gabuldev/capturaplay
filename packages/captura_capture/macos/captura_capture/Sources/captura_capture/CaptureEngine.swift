@@ -444,10 +444,14 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
         if demand.video {
             videoDataOutput.alwaysDiscardsLateVideoFrames = true
             videoDataOutput.setSampleBufferDelegate(self, queue: videoQueue)
-            if demand.encoder {
+            if demand.encoder && !nativeFormatFeedsEncoder() {
                 videoDataOutput.videoSettings = Self.encoderVideoSettings
+                captureLog.info("captura converte para 420v antes do encoder")
             } else {
                 videoDataOutput.videoSettings = nil
+                if demand.encoder {
+                    captureLog.info("captura entra no encoder sem conversão de pixel")
+                }
             }
             if !videoDataAttached, session.canAddOutput(videoDataOutput) {
                 session.addOutput(videoDataOutput)
@@ -489,6 +493,20 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
             }
         }
         return (video, audio, encoder)
+    }
+
+    /// 420v, 420f and BGRA are already what VideoToolbox encodes from an IOSurface.
+    /// Forcing `videoSettings` in that case copies a full 1080p frame first.
+    private func nativeFormatFeedsEncoder() -> Bool {
+        guard let id = activeVideoId, let device = device(id: id, media: .video) else { return false }
+        switch CMFormatDescriptionGetMediaSubType(device.activeFormat.formatDescription) {
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+             kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+             kCVPixelFormatType_32BGRA:
+            return true
+        default:
+            return false
+        }
     }
 
     private static let encoderVideoSettings: [String: Any] = [

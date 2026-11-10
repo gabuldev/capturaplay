@@ -88,6 +88,7 @@ class ReceiverController extends ChangeNotifier {
   String spikeStage = '';
   String digest = '';
   String linkHint = '';
+  int frameHeight = 0;
   bool showStats = false;
   bool smooth = true;
   bool chrome = true;
@@ -133,6 +134,7 @@ class ReceiverController extends ChangeNotifier {
           spikeStage = '';
           digest = '';
           linkHint = '';
+          frameHeight = 0;
         }
       case ReceiverStatsChanged(
         :final fps,
@@ -161,6 +163,7 @@ class ReceiverController extends ChangeNotifier {
         :final spikeStage,
         :final digest,
         :final linkHint,
+        :final frameHeight,
       ):
         this.fps = fps;
         this.displayedFps = displayedFps;
@@ -188,6 +191,7 @@ class ReceiverController extends ChangeNotifier {
         this.spikeStage = spikeStage;
         this.digest = digest;
         this.linkHint = linkHint;
+        this.frameHeight = frameHeight;
     }
     notifyListeners();
   }
@@ -296,6 +300,7 @@ class _ReceiverPageState extends State<ReceiverPage> {
                     spikeStage: controller.spikeStage,
                     digest: controller.digest,
                     linkHint: controller.linkHint,
+                    frameHeight: controller.frameHeight,
                   ),
                 ),
             ],
@@ -472,6 +477,13 @@ class _ConnectedChrome extends StatelessWidget {
   }
 }
 
+String _resolution(int height) {
+  if (height >= 1080) return '1080p';
+  if (height >= 720) return '720p';
+  if (height > 0) return '${height}p';
+  return '—';
+}
+
 String _ms(double value) {
   if (value < 0) return '—';
   return value.round().toString();
@@ -511,6 +523,7 @@ class _Stats extends StatelessWidget {
     required this.spikeStage,
     required this.digest,
     required this.linkHint,
+    required this.frameHeight,
   });
 
   final double? fps;
@@ -539,6 +552,7 @@ class _Stats extends StatelessWidget {
   final String spikeStage;
   final String digest;
   final String linkHint;
+  final int frameHeight;
 
   @override
   Widget build(BuildContext context) {
@@ -613,6 +627,10 @@ class _Stats extends StatelessWidget {
                         : '$bitrateMbps Mb/s')
                   : 'taxa do encoder indisponível',
               style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
+            ),
+            Text(
+              '${_resolution(frameHeight)} · último cap ${_ms(stageCaptureMs)} enc ${_ms(stageEncodeMs)} rede ${_ms(stageNetworkMs)} dec ${_ms(stageDecodeMs)}',
+              style: const TextStyle(color: CapturaColors.ink, fontSize: 10),
             ),
             Text(
               'cap ${_ms(stageCaptureMs)} · enc ${_ms(stageEncodeMs)} · tx ${_ms(stageQueueMs)} · rede ${_ms(stageNetworkMs)}',

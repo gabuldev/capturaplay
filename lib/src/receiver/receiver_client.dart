@@ -53,6 +53,7 @@ class ReceiverStatsChanged extends ReceiverEvent {
     this.spikeStage = '',
     this.digest = '',
     this.linkHint = '',
+    this.frameHeight = 0,
   });
 
   final double fps;
@@ -81,6 +82,7 @@ class ReceiverStatsChanged extends ReceiverEvent {
   final String spikeStage;
   final String digest;
   final String linkHint;
+  final int frameHeight;
 }
 
 abstract class ReceiverClient {
@@ -192,6 +194,7 @@ ReceiverEvent? _decode(Object? raw) {
       final spikeStage = map['spikeStage'];
       final digest = map['digest'];
       final linkHint = map['linkHint'];
+      final frameHeight = map['frameHeight'];
       return ReceiverStatsChanged(
         fps: fps is num ? fps.toDouble() : 0,
         displayedFps: displayed is num ? displayed.toDouble() : null,
@@ -219,6 +222,7 @@ ReceiverEvent? _decode(Object? raw) {
         spikeStage: spikeStage is String ? spikeStage : '',
         digest: digest is String ? digest : '',
         linkHint: linkHint is String ? linkHint : '',
+        frameHeight: frameHeight is num ? frameHeight.toInt() : 0,
       );
     default:
       return null;

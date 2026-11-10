@@ -202,6 +202,7 @@ final class ReceiverHub {
     private var waitingForKeyframe = 0
     private var awaitingKeyframe = false
     private var configuredBitrateMbps = 0
+    private var configuredHeight = 0
     private var configuredMaxQp = 0
     private var lastLatencyMs = 0.0
 
@@ -494,6 +495,10 @@ final class ReceiverHub {
                 }
                 if status == noErr, let description {
                     format = description
+                    if self.configuredHeight != sets.height {
+                        self.configuredHeight = sets.height
+                        self.stageWindow = StageWindow()
+                    }
                     pixelDecoder.update(format: description)
                     if let mbps = LanWire.configBitrateMbps(of: payload) {
                         self.configuredBitrateMbps = mbps
@@ -1022,6 +1027,7 @@ final class ReceiverHub {
             "decoderErrors": decoderErrors,
             "waitingKeyframe": waitingForKeyframe,
             "bitrateMbps": configuredBitrateMbps,
+            "frameHeight": configuredHeight,
             "maxFrameQp": configuredMaxQp,
             "stageCaptureMs": Self.ms(stageCaptureUs),
             "stageEncodeMs": Self.ms(stageEncodeUs),
@@ -1228,11 +1234,14 @@ private final class PixelDecoder {
             },
             decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
         )
+        let decoderSpec: [NSString: Any] = [
+            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true,
+        ]
         var created: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             formatDescription: format,
-            decoderSpecification: nil,
+            decoderSpecification: decoderSpec as CFDictionary,
             imageBufferAttributes: attributes as CFDictionary,
             outputCallback: &callback,
             decompressionSessionOut: &created
@@ -1242,6 +1251,10 @@ private final class PixelDecoder {
             return
         }
         VTSessionSetProperty(created, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        // One hardware thread. A decoder pool adds a dispatch hop that shows up at 1080p.
+        // kVTDecodeFrame_1xRealTimePlayback is the opposite of what we want: it lets the
+        // decoder wait. flags: stays empty in decode().
+        _ = VTSessionSetProperty(created, key: kVTDecompressionPropertyKey_ThreadCount, value: 1 as CFNumber)
         session = created
     }
 

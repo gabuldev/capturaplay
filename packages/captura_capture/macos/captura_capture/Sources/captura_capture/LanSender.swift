@@ -170,6 +170,9 @@ final class LanSender: NSObject, CaptureMediaSink {
                 finishFrame()
                 return
             }
+            let subtype = CVPixelBufferGetPixelFormatType(pixelBuffer)
+            let scaled = sourceWidth != target.0 || sourceHeight != target.1
+            lanLog.info("encoder \(target.0, privacy: .public)x\(target.1, privacy: .public) fonte \(Self.fourCC(subtype), privacy: .public) escala \(scaled, privacy: .public)")
         }
         guard let compression else {
             finishFrame()
@@ -212,7 +215,7 @@ final class LanSender: NSObject, CaptureMediaSink {
             sender.handleEncoded(status: status, sampleBuffer: sampleBuffer, sourceFrameRefcon: sourceFrameRefcon)
         }
         let spec = NSMutableDictionary()
-        spec[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder] = true
+        spec[kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder] = true
         spec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true
         var status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -226,6 +229,22 @@ final class LanSender: NSObject, CaptureMediaSink {
             refcon: Unmanaged.passUnretained(self).toOpaque(),
             compressionSessionOut: &session
         )
+        if status != noErr || session == nil {
+            spec[kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder] = false
+            spec[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder] = true
+            status = VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                width: Int32(width),
+                height: Int32(height),
+                codecType: kCMVideoCodecType_H264,
+                encoderSpecification: spec as CFDictionary,
+                imageBufferAttributes: nil,
+                compressedDataAllocator: nil,
+                outputCallback: callback,
+                refcon: Unmanaged.passUnretained(self).toOpaque(),
+                compressionSessionOut: &session
+            )
+        }
         if status != noErr || session == nil {
             status = VTCompressionSessionCreate(
                 allocator: kCFAllocatorDefault,
@@ -247,7 +266,10 @@ final class LanSender: NSObject, CaptureMediaSink {
         let bitrate = self.bitrate
         let smooth = self.isSmooth()
         let interval = smooth ? 120 : 8
-        let profile = smooth
+        // 720p Ultra stays Constrained Baseline. 1080p Ultra uses High with
+        // reordering still off: CABAC keeps the 12 Mb/s IDR smaller, which is
+        // what was pushing max toward 40 ms. B-frames stay disabled above.
+        let profile = (smooth || height >= 1080)
             ? kVTProfileLevel_H264_High_AutoLevel
             : kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
@@ -715,6 +737,16 @@ final class LanSender: NSObject, CaptureMediaSink {
 
     private static func hostUs() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1_000_000)
+    }
+
+    private static func fourCC(_ code: OSType) -> String {
+        let bytes = [
+            UInt8((code >> 24) & 0xff),
+            UInt8((code >> 16) & 0xff),
+            UInt8((code >> 8) & 0xff),
+            UInt8(code & 0xff),
+        ]
+        return String(bytes: bytes, encoding: .ascii) ?? "?"
     }
 
     private func publish(enabled: Bool, clients: Int, error: String?) {

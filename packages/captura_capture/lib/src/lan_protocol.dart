@@ -800,6 +800,16 @@ StreamTune tuneForLatency(bool lowLatency) {
 
 int normalizeStreamHeight(int height) => height <= 720 ? 720 : 1080;
 
+/// 720p Ultra is left alone. 1080p Ultra defaults to 12 Mb/s so the IDR
+/// is small enough to stay under ~30 ms, unless the user already chose 10
+/// or a value in 12...15.
+int bitrateForUltraHeight({required int height, required int bitrateMbps}) {
+  if (height <= 720) return bitrateMbps;
+  if (bitrateMbps <= 10) return bitrateMbps;
+  if (bitrateMbps > 15) return 12;
+  return bitrateMbps;
+}
+
 /// A partial UDP frame older than this is discarded. Same value as
 /// `UdpReassembler.partialTimeout` in LanWire.swift.
 const udpPartialTimeoutUs = 8000;
