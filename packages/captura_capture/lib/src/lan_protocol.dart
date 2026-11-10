@@ -22,6 +22,8 @@ abstract final class LanType {
   static const helloAck = 2;
   static const videoConfig = 0x10;
   static const videoFrame = 0x11;
+  static const keyframeRequest = 0x12;
+  static const transport = 0x14;
   static const audioConfig = 0x20;
   static const audioFrame = 0x21;
   static const input = 0x30;
@@ -43,6 +45,7 @@ abstract final class LanFeatures {
   static const video = 1;
   static const audio = 2;
   static const input = 4;
+  static const udp = 8;
 }
 
 class LanDecodeException implements Exception {
@@ -235,9 +238,12 @@ class LanVideoFrame {
     required this.nalus,
     this.sequence = 0,
     this.captureHostUs = 0,
+    this.encoderInUs = 0,
+    this.encoderOutUs = 0,
+    this.sendUs = 0,
   });
 
-  static const prefixSize = 24;
+  static const prefixSize = 48;
   static const keyframeFlag = 1;
 
   final bool keyframe;
@@ -245,6 +251,9 @@ class LanVideoFrame {
   final int senderLatencyUs;
   final int sequence;
   final int captureHostUs;
+  final int encoderInUs;
+  final int encoderOutUs;
+  final int sendUs;
   final Uint8List nalus;
 
   Uint8List encode() {
@@ -255,6 +264,9 @@ class LanVideoFrame {
     view.setUint64(4, ptsUs, Endian.big);
     view.setUint32(12, senderLatencyUs, Endian.big);
     view.setUint64(16, captureHostUs, Endian.big);
+    view.setUint64(24, encoderInUs, Endian.big);
+    view.setUint64(32, encoderOutUs, Endian.big);
+    view.setUint64(40, sendUs, Endian.big);
     out.setRange(prefixSize, out.length, nalus);
     return out;
   }
@@ -269,8 +281,265 @@ class LanVideoFrame {
       ptsUs: view.getUint64(4, Endian.big),
       senderLatencyUs: view.getUint32(12, Endian.big),
       captureHostUs: view.getUint64(16, Endian.big),
+      encoderInUs: view.getUint64(24, Endian.big),
+      encoderOutUs: view.getUint64(32, Endian.big),
+      sendUs: view.getUint64(40, Endian.big),
       nalus: Uint8List.sublistView(payload, prefixSize),
     );
+  }
+}
+
+/// One UDP datagram. Fragment 0 carries [UdpTiming] ahead of the NAL bytes.
+class UdpDatagram {
+  const UdpDatagram({
+    required this.flags,
+    required this.frameId,
+    required this.fragIndex,
+    required this.fragCount,
+    required this.payload,
+  });
+
+  static const headerSize = 12;
+  static const timingSize = 32;
+  static const datagramSize = 1200;
+  static const keyframeFlag = 0x01;
+  static const timingFlag = 0x02;
+  static const bindFlag = 0x80;
+  static const magic = [0x43, 0x50, 0x4C, 0x55];
+
+  final int flags;
+  final int frameId;
+  final int fragIndex;
+  final int fragCount;
+  final Uint8List payload;
+
+  bool get isBind => flags & bindFlag != 0;
+  bool get keyframe => flags & keyframeFlag != 0;
+  bool get hasTiming => flags & timingFlag != 0;
+
+  Uint8List encode() {
+    final out = Uint8List(headerSize + payload.length);
+    final view = ByteData.sublistView(out);
+    out[0] = magic[0];
+    out[1] = magic[1];
+    out[2] = magic[2];
+    out[3] = magic[3];
+    view.setUint8(4, LanLimits.version);
+    view.setUint8(5, flags);
+    view.setUint16(6, frameId & 0xffff, Endian.big);
+    view.setUint16(8, fragIndex & 0xffff, Endian.big);
+    view.setUint16(10, fragCount & 0xffff, Endian.big);
+    out.setRange(headerSize, out.length, payload);
+    return out;
+  }
+
+  static UdpDatagram decode(Uint8List datagram) {
+    if (datagram.length < headerSize) throw const LanDecodeException('udp');
+    for (var i = 0; i < 4; i++) {
+      if (datagram[i] != magic[i]) throw const LanDecodeException('udp-magic');
+    }
+    final view = ByteData.sublistView(datagram);
+    if (view.getUint8(4) != LanLimits.version) {
+      throw const LanDecodeException('udp-version');
+    }
+    return UdpDatagram(
+      flags: view.getUint8(5),
+      frameId: view.getUint16(6, Endian.big),
+      fragIndex: view.getUint16(8, Endian.big),
+      fragCount: view.getUint16(10, Endian.big),
+      payload: Uint8List.sublistView(datagram, headerSize),
+    );
+  }
+}
+
+class UdpTiming {
+  const UdpTiming({
+    required this.captureUs,
+    required this.encoderInUs,
+    required this.encoderOutUs,
+    required this.sendUs,
+  });
+
+  final int captureUs;
+  final int encoderInUs;
+  final int encoderOutUs;
+  final int sendUs;
+
+  Uint8List encode() {
+    final out = Uint8List(UdpDatagram.timingSize);
+    final view = ByteData.sublistView(out);
+    view.setUint64(0, captureUs, Endian.big);
+    view.setUint64(8, encoderInUs, Endian.big);
+    view.setUint64(16, encoderOutUs, Endian.big);
+    view.setUint64(24, sendUs, Endian.big);
+    return out;
+  }
+
+  static UdpTiming decode(Uint8List bytes) {
+    if (bytes.length < UdpDatagram.timingSize) {
+      throw const LanDecodeException('udp-timing');
+    }
+    final view = ByteData.sublistView(bytes);
+    return UdpTiming(
+      captureUs: view.getUint64(0, Endian.big),
+      encoderInUs: view.getUint64(8, Endian.big),
+      encoderOutUs: view.getUint64(16, Endian.big),
+      sendUs: view.getUint64(24, Endian.big),
+    );
+  }
+}
+
+class UdpFrame {
+  const UdpFrame({
+    required this.frameId,
+    required this.keyframe,
+    required this.timing,
+    required this.nalus,
+  });
+
+  final int frameId;
+  final bool keyframe;
+  final UdpTiming timing;
+  final Uint8List nalus;
+}
+
+Uint8List udpBindDatagram() {
+  return UdpDatagram(
+    flags: UdpDatagram.bindFlag,
+    frameId: 0,
+    fragIndex: 0,
+    fragCount: 0,
+    payload: Uint8List(0),
+  ).encode();
+}
+
+/// Splits one access unit into MTU-sized datagrams. Fragment 0 starts with
+/// the timing block so a lost tail cannot be displayed with a stale clock.
+List<Uint8List> packetizeUdpFrame(UdpFrame frame) {
+  if (frame.nalus.isEmpty) return const [];
+  final firstBudget =
+      UdpDatagram.datagramSize -
+      UdpDatagram.headerSize -
+      UdpDatagram.timingSize;
+  final nextBudget = UdpDatagram.datagramSize - UdpDatagram.headerSize;
+  final rest = frame.nalus.length > firstBudget
+      ? frame.nalus.length - firstBudget
+      : 0;
+  final extra = rest == 0 ? 0 : (rest + nextBudget - 1) ~/ nextBudget;
+  final count = 1 + extra;
+  final packets = <Uint8List>[];
+  var offset = 0;
+  for (var index = 0; index < count; index++) {
+    final budget = index == 0 ? firstBudget : nextBudget;
+    final take = frame.nalus.length - offset;
+    final size = take < budget ? take : budget;
+    final piece = Uint8List.sublistView(frame.nalus, offset, offset + size);
+    final payload = index == 0
+        ? Uint8List.fromList([...frame.timing.encode(), ...piece])
+        : Uint8List.fromList(piece);
+    final flags =
+        (frame.keyframe ? UdpDatagram.keyframeFlag : 0) |
+        (index == 0 ? UdpDatagram.timingFlag : 0);
+    packets.add(
+      UdpDatagram(
+        flags: flags,
+        frameId: frame.frameId,
+        fragIndex: index,
+        fragCount: count,
+        payload: payload,
+      ).encode(),
+    );
+    offset += size;
+  }
+  return packets;
+}
+
+class UdpIngest {
+  const UdpIngest({
+    this.frame,
+    this.droppedIncomplete = false,
+    this.ignored = false,
+  });
+
+  final UdpFrame? frame;
+  final bool droppedIncomplete;
+  final bool ignored;
+}
+
+/// Keeps a single frame in flight. A newer frame id discards the partial one.
+class UdpReassembler {
+  int? _frameId;
+  int _count = 0;
+  List<Uint8List?> _parts = [];
+  bool _keyframe = false;
+  UdpTiming? _timing;
+  int _got = 0;
+
+  UdpIngest add(Uint8List datagram) {
+    final packet = UdpDatagram.decode(datagram);
+    if (packet.isBind || packet.fragCount == 0) {
+      return const UdpIngest(ignored: true);
+    }
+    if (packet.fragIndex >= packet.fragCount) {
+      throw const LanDecodeException('udp-frag');
+    }
+    if (_frameId != null && packet.frameId != _frameId) {
+      final ahead = (packet.frameId - _frameId!) & 0xffff;
+      if (ahead == 0 || ahead >= 0x8000) {
+        return const UdpIngest(ignored: true);
+      }
+      final dropped = _got != _count;
+      _reset();
+      _start(packet);
+      final done = _store(packet);
+      return UdpIngest(frame: done, droppedIncomplete: dropped);
+    }
+    if (_frameId == null) _start(packet);
+    if (packet.fragCount != _count) throw const LanDecodeException('udp-count');
+    final done = _store(packet);
+    return UdpIngest(frame: done);
+  }
+
+  void _start(UdpDatagram packet) {
+    _frameId = packet.frameId;
+    _count = packet.fragCount;
+    _parts = List<Uint8List?>.filled(packet.fragCount, null);
+    _keyframe = packet.keyframe;
+    _got = 0;
+    _timing = null;
+  }
+
+  UdpFrame? _store(UdpDatagram packet) {
+    if (_parts[packet.fragIndex] != null) return null;
+    if (packet.fragIndex == 0) {
+      if (!packet.hasTiming || packet.payload.length < UdpDatagram.timingSize) {
+        throw const LanDecodeException('udp-timing');
+      }
+      _timing = UdpTiming.decode(packet.payload);
+      _parts[0] = Uint8List.sublistView(packet.payload, UdpDatagram.timingSize);
+      _keyframe = packet.keyframe;
+    } else {
+      _parts[packet.fragIndex] = packet.payload;
+    }
+    _got += 1;
+    if (_got != _count || _timing == null) return null;
+    final nalus = Uint8List.fromList(_parts.expand((part) => part!).toList());
+    final frame = UdpFrame(
+      frameId: _frameId!,
+      keyframe: _keyframe,
+      timing: _timing!,
+      nalus: nalus,
+    );
+    _reset();
+    return frame;
+  }
+
+  void _reset() {
+    _frameId = null;
+    _count = 0;
+    _parts = [];
+    _got = 0;
+    _timing = null;
   }
 }
 
@@ -393,6 +662,69 @@ int glassLatencyUs({
   required int offsetUs,
 }) {
   return displayReceiverUs + offsetUs - captureSenderUs;
+}
+
+/// Client-observed round trip, with the server's processing time removed.
+int roundTripUs({
+  required int clientSendUs,
+  required int serverRecvUs,
+  required int serverSendUs,
+  required int clientRecvUs,
+}) {
+  return (clientRecvUs - clientSendUs) - (serverSendUs - serverRecvUs);
+}
+
+/// The offset is doing real work when the two clocks disagree by more than
+/// the trip. A 100 ms "latency" with a 2 ms RTT is the clock, not the link.
+bool clockOffsetLooksSkewed({required int offsetUs, required int rttUs}) {
+  final trip = rttUs < 0 ? -rttUs : rttUs;
+  final skew = offsetUs < 0 ? -offsetUs : offsetUs;
+  final allowance = trip > 5000 ? trip : 5000;
+  return skew > allowance + 2000;
+}
+
+class StreamStages {
+  const StreamStages({
+    required this.captureToEncoderUs,
+    required this.encodeUs,
+    required this.sendQueueUs,
+    required this.networkUs,
+    required this.decodeUs,
+    required this.toGlassUs,
+    required this.totalUs,
+  });
+
+  final int captureToEncoderUs;
+  final int encodeUs;
+  final int sendQueueUs;
+  final int networkUs;
+  final int decodeUs;
+  final int toGlassUs;
+  final int totalUs;
+}
+
+/// Sender stamps share the Mac clock. Receiver stamps share the phone clock.
+/// [offsetUs] converts a phone stamp into the Mac clock.
+StreamStages stageDurations({
+  required int captureUs,
+  required int encoderInUs,
+  required int encoderOutUs,
+  required int sendUs,
+  required int recvUs,
+  required int decodeSubmitUs,
+  required int decodedUs,
+  required int glassUs,
+  required int offsetUs,
+}) {
+  return StreamStages(
+    captureToEncoderUs: encoderInUs - captureUs,
+    encodeUs: encoderOutUs - encoderInUs,
+    sendQueueUs: sendUs - encoderOutUs,
+    networkUs: (recvUs + offsetUs) - sendUs,
+    decodeUs: decodedUs - decodeSubmitUs,
+    toGlassUs: glassUs - decodedUs,
+    totalUs: (glassUs + offsetUs) - captureUs,
+  );
 }
 
 int clampStreamBitrateMbps(int value) => value.clamp(10, 30);

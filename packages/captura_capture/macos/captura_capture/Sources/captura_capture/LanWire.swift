@@ -10,6 +10,8 @@ enum LanType {
     static let helloAck: UInt8 = 2
     static let videoConfig: UInt8 = 0x10
     static let videoFrame: UInt8 = 0x11
+    static let keyframeRequest: UInt8 = 0x12
+    static let transport: UInt8 = 0x14
     static let audioConfig: UInt8 = 0x20
     static let audioFrame: UInt8 = 0x21
     static let input: UInt8 = 0x30
@@ -31,6 +33,7 @@ enum LanFeatures {
     static let video: UInt16 = 1
     static let audio: UInt16 = 2
     static let input: UInt16 = 4
+    static let udp: UInt16 = 8
 }
 
 enum LanDecodeError: Error {
@@ -96,6 +99,9 @@ enum LanWire {
         ptsUs: UInt64,
         senderLatencyUs: UInt32,
         captureHostUs: UInt64,
+        encoderInUs: UInt64,
+        encoderOutUs: UInt64,
+        sendUs: UInt64,
         nalus: Data
     ) -> Data {
         var payload = Data()
@@ -104,8 +110,19 @@ enum LanWire {
         payload.appendU64(ptsUs)
         payload.appendU32(senderLatencyUs)
         payload.appendU64(captureHostUs)
+        payload.appendU64(encoderInUs)
+        payload.appendU64(encoderOutUs)
+        payload.appendU64(sendUs)
         payload.append(nalus)
         return encode(LanMessage(type: LanType.videoFrame, flags: 0, payload: payload))
+    }
+
+    static func keyframeRequest() -> Data {
+        encode(LanMessage(type: LanType.keyframeRequest, flags: 0, payload: Data()))
+    }
+
+    static func transport(udp: Bool) -> Data {
+        encode(LanMessage(type: LanType.transport, flags: 0, payload: Data([udp ? 1 : 0])))
     }
 
     static func ping(clientTimeUs: UInt64) -> Data {
@@ -122,8 +139,8 @@ enum LanWire {
         return encode(LanMessage(type: LanType.pong, flags: 0, payload: payload))
     }
 
-    static func framePrefix(of payload: Data) -> (keyframe: Bool, sequence: UInt16, ptsUs: UInt64, senderLatencyUs: UInt32, captureHostUs: UInt64, nalus: Data)? {
-        guard payload.count >= 24 else { return nil }
+    static func framePrefix(of payload: Data) -> (keyframe: Bool, sequence: UInt16, ptsUs: UInt64, senderLatencyUs: UInt32, captureHostUs: UInt64, encoderInUs: UInt64, encoderOutUs: UInt64, sendUs: UInt64, nalus: Data)? {
+        guard payload.count >= 48 else { return nil }
         let flags = payload.u16(0)
         return (
             keyframe: flags & 1 != 0,
@@ -131,8 +148,16 @@ enum LanWire {
             ptsUs: payload.u64(4),
             senderLatencyUs: payload.u32(12),
             captureHostUs: payload.u64(16),
-            nalus: payload.subdata(in: 24..<payload.count)
+            encoderInUs: payload.u64(24),
+            encoderOutUs: payload.u64(32),
+            sendUs: payload.u64(40),
+            nalus: payload.subdata(in: 48..<payload.count)
         )
+    }
+
+    static func transportIsUdp(of payload: Data) -> Bool? {
+        guard payload.count >= 1 else { return nil }
+        return payload[0] == 1
     }
 
     /// Same formula as `clockOffsetUs` in lan_protocol.dart.
@@ -140,6 +165,12 @@ enum LanWire {
         let first = Int64(bitPattern: serverRecv) - Int64(bitPattern: clientSend)
         let second = Int64(bitPattern: serverSend) - Int64(bitPattern: clientRecv)
         return (first + second) / 2
+    }
+
+    static func roundTripUs(clientSend: UInt64, serverRecv: UInt64, serverSend: UInt64, clientRecv: UInt64) -> Int64 {
+        let total = Int64(bitPattern: clientRecv) - Int64(bitPattern: clientSend)
+        let server = Int64(bitPattern: serverSend) - Int64(bitPattern: serverRecv)
+        return total - server
     }
 
     static func parameterSets(of payload: Data) -> (width: Int, height: Int, fpsMilli: Int, sps: Data, pps: Data)? {
@@ -180,6 +211,183 @@ enum LanWire {
     static func pongTimes(of payload: Data) -> (t1: UInt64, t2: UInt64, t3: UInt64)? {
         guard payload.count >= 24 else { return nil }
         return (payload.u64(0), payload.u64(8), payload.u64(16))
+    }
+}
+
+enum UdpFlag {
+    static let keyframe: UInt8 = 0x01
+    static let timing: UInt8 = 0x02
+    static let bind: UInt8 = 0x80
+}
+
+enum UdpLimits {
+    static let headerSize = 12
+    static let timingSize = 32
+    static let datagramSize = 1200
+    static let magic: [UInt8] = [0x43, 0x50, 0x4C, 0x55]
+}
+
+struct UdpTiming {
+    var captureUs: UInt64
+    var encoderInUs: UInt64
+    var encoderOutUs: UInt64
+    var sendUs: UInt64
+}
+
+struct UdpPacket {
+    var flags: UInt8
+    var frameId: UInt16
+    var fragIndex: UInt16
+    var fragCount: UInt16
+    var payload: Data
+
+    var isBind: Bool { flags & UdpFlag.bind != 0 }
+    var keyframe: Bool { flags & UdpFlag.keyframe != 0 }
+    var hasTiming: Bool { flags & UdpFlag.timing != 0 }
+}
+
+struct UdpAssembled {
+    var frameId: UInt16
+    var keyframe: Bool
+    var timing: UdpTiming
+    var nalus: Data
+}
+
+enum LanUdp {
+    static func bindPacket() -> Data {
+        packet(flags: UdpFlag.bind, frameId: 0, fragIndex: 0, fragCount: 0, payload: Data())
+    }
+
+    static func isBind(_ data: Data) -> Bool {
+        guard let parsed = parse(data) else { return false }
+        return parsed.isBind || parsed.fragCount == 0
+    }
+
+    static func packets(frameId: UInt16, keyframe: Bool, timing: UdpTiming, nalus: Data) -> [Data] {
+        guard !nalus.isEmpty else { return [] }
+        let firstBudget = UdpLimits.datagramSize - UdpLimits.headerSize - UdpLimits.timingSize
+        let nextBudget = UdpLimits.datagramSize - UdpLimits.headerSize
+        let rest = nalus.count > firstBudget ? nalus.count - firstBudget : 0
+        let extra = rest == 0 ? 0 : (rest + nextBudget - 1) / nextBudget
+        let count = 1 + extra
+        var packets: [Data] = []
+        var offset = 0
+        for index in 0..<count {
+            let budget = index == 0 ? firstBudget : nextBudget
+            let size = min(nalus.count - offset, budget)
+            var payload = Data()
+            if index == 0 {
+                payload.appendU64(timing.captureUs)
+                payload.appendU64(timing.encoderInUs)
+                payload.appendU64(timing.encoderOutUs)
+                payload.appendU64(timing.sendUs)
+            }
+            payload.append(nalus.subdata(in: offset..<(offset + size)))
+            var flags: UInt8 = keyframe ? UdpFlag.keyframe : 0
+            if index == 0 { flags |= UdpFlag.timing }
+            packets.append(packet(flags: flags, frameId: frameId, fragIndex: UInt16(index), fragCount: UInt16(count), payload: payload))
+            offset += size
+        }
+        return packets
+    }
+
+    static func parse(_ data: Data) -> UdpPacket? {
+        guard data.count >= UdpLimits.headerSize else { return nil }
+        for index in 0..<4 where data[index] != UdpLimits.magic[index] { return nil }
+        guard data[4] == LanLimits.version else { return nil }
+        return UdpPacket(
+            flags: data[5],
+            frameId: data.u16(6),
+            fragIndex: data.u16(8),
+            fragCount: data.u16(10),
+            payload: data.subdata(in: UdpLimits.headerSize..<data.count)
+        )
+    }
+
+    private static func packet(flags: UInt8, frameId: UInt16, fragIndex: UInt16, fragCount: UInt16, payload: Data) -> Data {
+        var data = Data()
+        data.append(contentsOf: UdpLimits.magic)
+        data.append(LanLimits.version)
+        data.append(flags)
+        data.appendU16(frameId)
+        data.appendU16(fragIndex)
+        data.appendU16(fragCount)
+        data.append(payload)
+        return data
+    }
+}
+
+final class UdpReassembler {
+    private var frameId: UInt16?
+    private var count = 0
+    private var parts: [Data?] = []
+    private var keyframe = false
+    private var timing: UdpTiming?
+    private var got = 0
+
+    /// Completed frame, and whether the previous partial frame was discarded.
+    func add(_ data: Data) -> (frame: UdpAssembled?, droppedIncomplete: Bool) {
+        guard let packet = LanUdp.parse(data) else { return (nil, false) }
+        if packet.isBind || packet.fragCount == 0 { return (nil, false) }
+        guard packet.fragIndex < packet.fragCount else { return (nil, false) }
+        if let current = frameId, packet.frameId != current {
+            let ahead = UInt16(truncatingIfNeeded: Int(packet.frameId) &- Int(current))
+            if ahead == 0 || ahead >= 0x8000 { return (nil, false) }
+            let dropped = got != count
+            reset()
+            start(packet)
+            let done = store(packet)
+            return (done, dropped)
+        }
+        if frameId == nil { start(packet) }
+        guard packet.fragCount == count else { return (nil, false) }
+        return (store(packet), false)
+    }
+
+    private func start(_ packet: UdpPacket) {
+        frameId = packet.frameId
+        count = Int(packet.fragCount)
+        parts = Array(repeating: nil, count: count)
+        keyframe = packet.keyframe
+        got = 0
+        timing = nil
+    }
+
+    private func store(_ packet: UdpPacket) -> UdpAssembled? {
+        let index = Int(packet.fragIndex)
+        guard parts.indices.contains(index), parts[index] == nil else { return nil }
+        if index == 0 {
+            guard packet.hasTiming, packet.payload.count >= UdpLimits.timingSize else { return nil }
+            timing = UdpTiming(
+                captureUs: packet.payload.u64(0),
+                encoderInUs: packet.payload.u64(8),
+                encoderOutUs: packet.payload.u64(16),
+                sendUs: packet.payload.u64(24)
+            )
+            parts[0] = packet.payload.subdata(in: UdpLimits.timingSize..<packet.payload.count)
+            keyframe = packet.keyframe
+        } else {
+            parts[index] = packet.payload
+        }
+        got += 1
+        guard got == count, let timing, let frameId else { return nil }
+        var nalus = Data()
+        for part in parts {
+            guard let part else { return nil }
+            nalus.append(part)
+        }
+        let frame = UdpAssembled(frameId: frameId, keyframe: keyframe, timing: timing, nalus: nalus)
+        reset()
+        return frame
+    }
+
+    private func reset() {
+        frameId = nil
+        count = 0
+        parts = []
+        got = 0
+        timing = nil
+        keyframe = false
     }
 }
 

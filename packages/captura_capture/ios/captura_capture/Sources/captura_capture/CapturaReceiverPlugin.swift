@@ -1,15 +1,18 @@
+import os
 import AVFoundation
 import CoreMedia
 import Flutter
 import Foundation
+import IOSurface
 import Network
 import QuartzCore
 import UIKit
 import VideoToolbox
 
-/// iPhone receiver. Compressed H.264 goes straight to an
-/// `AVSampleBufferDisplayLayer` (hardware decode + display). That is lower
-/// latency than decoding into a pixel buffer and uploading a Flutter texture.
+/// iPhone receiver. Suave keeps `AVSampleBufferDisplayLayer`. Ultra decodes
+/// with VideoToolbox and puts the IOSurface on a layer for the next vsync,
+/// which skips the display layer's queue. The view stays a UIKit platform
+/// view: on iOS that is a real UIView, not a Flutter texture copy.
 public final class CapturaReceiverPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private let hub = ReceiverHub()
 
@@ -93,27 +96,52 @@ final class DisplayPlatformView: NSObject, FlutterPlatformView {
 
 final class DisplayHostView: UIView {
     weak var hub: ReceiverHub?
-
-    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
-
-    var sampleLayer: AVSampleBufferDisplayLayer {
-        guard let sample = layer as? AVSampleBufferDisplayLayer else {
-            preconditionFailure("DisplayHostView layer must be AVSampleBufferDisplayLayer")
-        }
-        return sample
-    }
+    let sampleLayer = AVSampleBufferDisplayLayer()
+    let pixelLayer = CALayer()
+    private var heldPixel: CVPixelBuffer?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
+        isOpaque = true
         backgroundColor = .black
         sampleLayer.videoGravity = .resizeAspect
         sampleLayer.backgroundColor = UIColor.black.cgColor
         sampleLayer.preventsDisplaySleepDuringVideoPlayback = true
+        pixelLayer.contentsGravity = .resizeAspect
+        pixelLayer.backgroundColor = UIColor.black.cgColor
+        pixelLayer.isHidden = true
+        layer.addSublayer(sampleLayer)
+        layer.addSublayer(pixelLayer)
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        sampleLayer.frame = bounds
+        pixelLayer.frame = bounds
+        let scale = window?.windowScene?.screen.scale ?? 2
+        pixelLayer.contentsScale = scale
+        sampleLayer.contentsScale = scale
+    }
+
+    func showPixel(_ buffer: CVPixelBuffer) {
+        heldPixel = buffer
+        sampleLayer.isHidden = true
+        pixelLayer.isHidden = false
+        if let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() {
+            pixelLayer.contents = surface
+        }
+    }
+
+    func showSamples() {
+        heldPixel = nil
+        pixelLayer.contents = nil
+        pixelLayer.isHidden = true
+        sampleLayer.isHidden = false
     }
 
     func detachFromHub() {
@@ -121,11 +149,18 @@ final class DisplayHostView: UIView {
     }
 }
 
+private let lanLog = Logger(subsystem: "dev.capturaplay.capturaplay", category: "lan.recv")
+
 final class ReceiverHub {
     var eventSink: FlutterEventSink?
     private let queue = DispatchQueue(label: "dev.capturaplay.lan.recv", qos: .userInteractive)
     private var browser: NWBrowser?
     private var connection: NWConnection?
+    private var udpConnection: NWConnection?
+    private var udpReassembler = UdpReassembler()
+    private var remoteUltra = false
+    private let pixelDecoder = PixelDecoder()
+    private var lastKeyframeAsk = CFTimeInterval(0)
     private var parser = LanStreamParser()
     private var endpoints: [String: NWEndpoint] = [:]
     private var desired: NWEndpoint?
@@ -142,6 +177,15 @@ final class ReceiverHub {
     private var paceAnchorPtsUs: UInt64?
     private let pacer = DisplayPacer()
     private var clockOffsetUs: Int64 = 0
+    private var rttUs: Int64 = 0
+    private var clockSuspect = false
+    private var stageCaptureUs: Int64 = -1
+    private var stageEncodeUs: Int64 = -1
+    private var stageQueueUs: Int64 = -1
+    private var stageNetworkUs: Int64 = -1
+    private var stageDecodeUs: Int64 = -1
+    private var stageGlassUs: Int64 = -1
+    private var lastStageLog = CFTimeInterval(0)
     private var receivedTimes: [CFTimeInterval] = []
     private var displayedTimes: [CFTimeInterval] = []
     private var lastStats: CFTimeInterval = 0
@@ -230,8 +274,17 @@ final class ReceiverHub {
     func attach(_ view: DisplayHostView) {
         view.hub = self
         display = view
-        if let lastKeyframe {
-            present(lastKeyframe, keyframe: true, captureHostUs: 0, flushBefore: true)
+        queue.async {
+            let ultra = self.remoteUltra
+            let sample = self.lastKeyframe
+            DispatchQueue.main.async {
+                if ultra {
+                    view.showSamples()
+                }
+                if let sample, !ultra {
+                    self.present(sample, keyframe: true, timing: .zero, flushBefore: true)
+                }
+            }
         }
     }
 
@@ -296,6 +349,9 @@ final class ReceiverHub {
             parser.reset()
             send(LanWire.hello(features: LanFeatures.video), on: connection)
             receive(on: connection)
+            if let remote = connection.currentPath?.remoteEndpoint {
+                openUdp(to: remote)
+            }
             emitState(phase: "connected", detail: nil)
         case .failed, .cancelled:
             guard self.connection === connection else { return }
@@ -318,9 +374,17 @@ final class ReceiverHub {
     private func tearDownConnection() {
         connection?.cancel()
         connection = nil
+        udpConnection?.cancel()
+        udpConnection = nil
+        udpReassembler = UdpReassembler()
+        remoteUltra = false
+        pixelDecoder.invalidate()
         parser.reset()
         format = nil
         lastKeyframe = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.display?.showSamples()
+        }
     }
 
     private func receive(on connection: NWConnection) {
@@ -346,7 +410,26 @@ final class ReceiverHub {
                 case LanType.videoConfig:
                     applyConfig(message.payload)
                 case LanType.videoFrame:
-                    applyFrame(message.payload)
+                    if !remoteUltra {
+                        applyFrame(message.payload)
+                    }
+                case LanType.transport:
+                    if let udp = LanWire.transportIsUdp(of: message.payload) {
+                        remoteUltra = udp
+                        if udp {
+                            stateLock.lock()
+                            jitter.removeAll()
+                            stateLock.unlock()
+                            if let remote = self.connection?.currentPath?.remoteEndpoint {
+                                openUdp(to: remote)
+                            }
+                        }
+                        DispatchQueue.main.async { [weak self] in
+                            if !udp {
+                                self?.display?.showSamples()
+                            }
+                        }
+                    }
                 case LanType.pong:
                     if let times = LanWire.pongTimes(of: message.payload) {
                         let clientRecv = Self.nowUs()
@@ -356,6 +439,16 @@ final class ReceiverHub {
                             serverSend: times.t3,
                             clientRecv: clientRecv
                         )
+                        self.rttUs = LanWire.roundTripUs(
+                            clientSend: times.t1,
+                            serverRecv: times.t2,
+                            serverSend: times.t3,
+                            clientRecv: clientRecv
+                        )
+                        let skew = self.clockOffsetUs < 0 ? -self.clockOffsetUs : self.clockOffsetUs
+                        let trip = self.rttUs < 0 ? -self.rttUs : self.rttUs
+                        let allowance = trip > 5_000 ? trip : 5_000
+                        self.clockSuspect = skew > allowance + 2_000
                     }
                 case LanType.audioConfig, LanType.audioFrame:
                     // TODO: audio. The Mac does not send it yet.
@@ -390,8 +483,9 @@ final class ReceiverHub {
                         )
                     }
                 }
-                if status == noErr {
+                if status == noErr, let description {
                     format = description
+                    pixelDecoder.update(format: description)
                     if let mbps = LanWire.configBitrateMbps(of: payload) {
                         self.configuredBitrateMbps = mbps
                     }
@@ -404,9 +498,31 @@ final class ReceiverHub {
     }
 
     private func applyFrame(_ payload: Data) {
-        guard let format, let prefix = LanWire.framePrefix(of: payload), !prefix.nalus.isEmpty else { return }
+        guard let prefix = LanWire.framePrefix(of: payload), !prefix.nalus.isEmpty else { return }
+        deliver(
+            nalus: prefix.nalus,
+            keyframe: prefix.keyframe,
+            sequence: prefix.sequence,
+            ptsUs: prefix.ptsUs,
+            timing: FrameTiming(
+                captureUs: prefix.captureHostUs,
+                encoderInUs: prefix.encoderInUs,
+                encoderOutUs: prefix.encoderOutUs,
+                sendUs: prefix.sendUs,
+                recvUs: Self.nowUs()
+            ),
+            direct: false
+        )
+    }
+
+    private func deliver(nalus: Data, keyframe: Bool, sequence: UInt16, ptsUs: UInt64, timing: FrameTiming, direct: Bool) {
+        guard !nalus.isEmpty else { return }
+        guard let format else {
+            askKeyframe()
+            return
+        }
         var block: CMBlockBuffer?
-        let length = prefix.nalus.count
+        let length = nalus.count
         guard CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
             memoryBlock: nil,
@@ -418,14 +534,14 @@ final class ReceiverHub {
             flags: 0,
             blockBufferOut: &block
         ) == kCMBlockBufferNoErr, let block else { return }
-        let copied = prefix.nalus.withUnsafeBytes { raw -> OSStatus in
+        let copied = nalus.withUnsafeBytes { raw -> OSStatus in
             guard let base = raw.baseAddress else { return -1 }
             return CMBlockBufferReplaceDataBytes(with: base, blockBuffer: block, offsetIntoDestination: 0, dataLength: length)
         }
         guard copied == kCMBlockBufferNoErr else { return }
-        var timing = CMSampleTimingInfo(
+        var sampleTiming = CMSampleTimingInfo(
             duration: .invalid,
-            presentationTimeStamp: CMTime(value: CMTimeValue(prefix.ptsUs), timescale: 1_000_000),
+            presentationTimeStamp: ptsUs == 0 ? .invalid : CMTime(value: CMTimeValue(ptsUs), timescale: 1_000_000),
             decodeTimeStamp: .invalid
         )
         var sampleSize = length
@@ -436,38 +552,41 @@ final class ReceiverHub {
             formatDescription: format,
             sampleCount: 1,
             sampleTimingEntryCount: 1,
-            sampleTimingArray: &timing,
+            sampleTimingArray: &sampleTiming,
             sampleSizeEntryCount: 1,
             sampleSizeArray: &sampleSize,
             sampleBufferOut: &sample
         )
         guard status == noErr, let sample else { return }
         markDisplayImmediately(sample)
-        if prefix.keyframe {
+        if keyframe {
             lastKeyframe = sample
         }
-        noteSequence(prefix.sequence)
+        noteSequence(sequence)
         noteReceived()
-        let recover = awaitingKeyframe && prefix.keyframe
-        if awaitingKeyframe && !prefix.keyframe {
+        let recover = awaitingKeyframe && keyframe
+        if awaitingKeyframe && !keyframe {
             waitingForKeyframe += 1
+            if direct || remoteUltra { askKeyframe() }
             emitStats(bufferDepth: bufferDepth())
             return
         }
         if recover {
             awaitingKeyframe = false
         }
-        if isSmooth() {
+        if direct || remoteUltra {
+            decodeAndShow(sample, timing: timing)
+        } else if isSmooth() {
             hold(
                 sample,
-                keyframe: prefix.keyframe,
-                captureHostUs: prefix.captureHostUs,
-                sequence: prefix.sequence,
-                ptsUs: prefix.ptsUs,
+                keyframe: keyframe,
+                timing: timing,
+                sequence: sequence,
+                ptsUs: ptsUs,
                 flushBefore: recover
             )
         } else {
-            present(sample, keyframe: prefix.keyframe, captureHostUs: prefix.captureHostUs, flushBefore: recover)
+            present(sample, keyframe: keyframe, timing: timing, flushBefore: recover)
         }
     }
 
@@ -490,10 +609,12 @@ final class ReceiverHub {
         )
     }
 
-    private func present(_ sample: CMSampleBuffer, keyframe: Bool, captureHostUs: UInt64, flushBefore: Bool) {
+    private func present(_ sample: CMSampleBuffer, keyframe: Bool, timing: FrameTiming, flushBefore: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.display?.showSamples()
             let displayedAt = Self.nowUs()
+            let glassUs = self.predictedGlassUs()
             var enqueued = false
             if let layer = self.display?.sampleLayer {
                 if layer.status == .failed {
@@ -515,7 +636,7 @@ final class ReceiverHub {
             }
             self.queue.async {
                 if enqueued {
-                    self.noteDisplayed(captureHostUs: captureHostUs, displayedAt: displayedAt)
+                    self.noteDisplayed(timing: timing, decodeSubmitUs: displayedAt, decodedUs: displayedAt, glassUs: glassUs)
                 } else if keyframe {
                     self.displayDrops += 1
                     self.emitStats(bufferDepth: 0)
@@ -535,19 +656,35 @@ final class ReceiverHub {
             if gap > 1 && gap < 240 {
                 networkDrops += gap - 1
                 awaitingKeyframe = true
+                askKeyframe()
             }
         }
         lastSequence = sequence
     }
 
-    private func noteDisplayed(captureHostUs: UInt64, displayedAt: UInt64) {
-        guard captureHostUs != 0 else { return } // re-shown cached keyframe: no timing data
+    private func noteDisplayed(timing: FrameTiming, decodeSubmitUs: UInt64, decodedUs: UInt64, glassUs: UInt64) {
+        guard timing.captureUs != 0 else { return }
         let now = CACurrentMediaTime()
         displayedTimes.append(now)
         displayedTimes.removeAll { now - $0 > 1 }
-        let latencyUs = Int64(bitPattern: displayedAt) + clockOffsetUs - Int64(bitPattern: captureHostUs)
+        func span(_ from: UInt64, _ to: UInt64) -> Int64 {
+            Int64(bitPattern: to) - Int64(bitPattern: from)
+        }
+        let offset = clockOffsetUs
+        stageCaptureUs = span(timing.captureUs, timing.encoderInUs)
+        stageEncodeUs = span(timing.encoderInUs, timing.encoderOutUs)
+        stageQueueUs = span(timing.encoderOutUs, timing.sendUs)
+        stageNetworkUs = (Int64(bitPattern: timing.recvUs) + offset) - Int64(bitPattern: timing.sendUs)
+        stageDecodeUs = span(decodeSubmitUs, decodedUs)
+        stageGlassUs = span(decodedUs, glassUs)
+        let latencyUs = Int64(bitPattern: glassUs) + offset - Int64(bitPattern: timing.captureUs)
         if latencyUs > 0 && latencyUs < 2_000_000 {
             lastLatencyMs = Double(latencyUs) / 1000.0
+        }
+        if now - lastStageLog >= 1 {
+            lastStageLog = now
+            let suspect = clockSuspect ? 1 : 0
+            lanLog.info("cap \(self.stageCaptureUs / 1000, privacy: .public) enc \(self.stageEncodeUs / 1000, privacy: .public) tx \(self.stageQueueUs / 1000, privacy: .public) rede \(self.stageNetworkUs / 1000, privacy: .public) dec \(self.stageDecodeUs / 1000, privacy: .public) vidro \(self.stageGlassUs / 1000, privacy: .public) total \(latencyUs / 1000, privacy: .public) off \(offset / 1000, privacy: .public) rtt \(self.rttUs / 1000, privacy: .public) relogio \(suspect, privacy: .public)")
         }
         emitStats(bufferDepth: bufferDepth())
     }
@@ -573,7 +710,7 @@ final class ReceiverHub {
     private func hold(
         _ sample: CMSampleBuffer,
         keyframe: Bool,
-        captureHostUs: UInt64,
+        timing: FrameTiming,
         sequence: UInt16,
         ptsUs: UInt64,
         flushBefore: Bool
@@ -581,7 +718,7 @@ final class ReceiverHub {
         let frame = HeldFrame(
             sample: sample,
             keyframe: keyframe,
-            captureHostUs: captureHostUs,
+            timing: timing,
             sequence: sequence,
             ptsUs: ptsUs,
             flushBefore: flushBefore
@@ -691,10 +828,109 @@ final class ReceiverHub {
         guard layer.isReadyForMoreMediaData else { return .notReady }
         layer.enqueue(frame.sample)
         let displayedAt = Self.nowUs()
+        let glassUs = predictedGlassUs()
+        let timing = frame.timing
         queue.async {
-            self.noteDisplayed(captureHostUs: frame.captureHostUs, displayedAt: displayedAt)
+            self.noteDisplayed(timing: timing, decodeSubmitUs: displayedAt, decodedUs: displayedAt, glassUs: glassUs)
         }
         return .shown
+    }
+
+    private func decodeAndShow(_ sample: CMSampleBuffer, timing: FrameTiming) {
+        let submit = Self.nowUs()
+        let status = pixelDecoder.decode(sample) { [weak self] buffer in
+            let decoded = Self.nowUs()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.display?.showPixel(buffer)
+                let glassUs = self.predictedGlassUs()
+                self.queue.async {
+                    self.noteDisplayed(timing: timing, decodeSubmitUs: submit, decodedUs: decoded, glassUs: glassUs)
+                }
+            }
+        }
+        if status != noErr {
+            decoderErrors += 1
+            awaitingKeyframe = true
+            askKeyframe()
+        }
+    }
+
+    private func predictedGlassUs() -> UInt64 {
+        let nowMedia = CACurrentMediaTime()
+        let target = pacer.targetTimestamp ?? nowMedia
+        let delta = max(0, target - nowMedia)
+        return Self.nowUs() + UInt64(delta * 1_000_000)
+    }
+
+    private func askKeyframe() {
+        let now = CACurrentMediaTime()
+        guard now - lastKeyframeAsk > 0.1, let connection else { return }
+        lastKeyframeAsk = now
+        send(LanWire.keyframeRequest(), on: connection)
+    }
+
+    private func openUdp(to endpoint: NWEndpoint) {
+        if let current = udpConnection, current.state == .ready || current.state == .preparing {
+            current.send(content: LanUdp.bindPacket(), completion: .idempotent)
+            return
+        }
+        udpConnection?.cancel()
+        udpConnection = nil
+        let connection = NWConnection(to: endpoint, using: udpParameters())
+        udpConnection = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .ready = state {
+                connection.send(content: LanUdp.bindPacket(), completion: .idempotent)
+                self.receiveUdp(on: connection)
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    private func receiveUdp(on connection: NWConnection) {
+        connection.receiveMessage { [weak self] data, _, _, error in
+            guard let self else { return }
+            if let data, !data.isEmpty {
+                self.ingestUdp(data)
+            }
+            if error != nil { return }
+            if self.udpConnection === connection {
+                self.receiveUdp(on: connection)
+            }
+        }
+    }
+
+    private func ingestUdp(_ data: Data) {
+        let result = udpReassembler.add(data)
+        if result.droppedIncomplete {
+            awaitingKeyframe = true
+            waitingForKeyframe += 1
+            askKeyframe()
+        }
+        guard let frame = result.frame, !frame.nalus.isEmpty else { return }
+        deliver(
+            nalus: frame.nalus,
+            keyframe: frame.keyframe,
+            sequence: frame.frameId,
+            ptsUs: 0,
+            timing: FrameTiming(
+                captureUs: frame.timing.captureUs,
+                encoderInUs: frame.timing.encoderInUs,
+                encoderOutUs: frame.timing.encoderOutUs,
+                sendUs: frame.timing.sendUs,
+                recvUs: Self.nowUs()
+            ),
+            direct: true
+        )
+    }
+
+    private func udpParameters() -> NWParameters {
+        let parameters = NWParameters.udp
+        parameters.serviceClass = .interactiveVideo
+        parameters.includePeerToPeer = true
+        return parameters
     }
 
     private func emitStats(bufferDepth: Int) {
@@ -713,6 +949,15 @@ final class ReceiverHub {
             "waitingKeyframe": waitingForKeyframe,
             "bitrateMbps": configuredBitrateMbps,
             "maxFrameQp": configuredMaxQp,
+            "stageCaptureMs": Self.ms(stageCaptureUs),
+            "stageEncodeMs": Self.ms(stageEncodeUs),
+            "stageQueueMs": Self.ms(stageQueueUs),
+            "stageNetworkMs": Self.ms(stageNetworkUs),
+            "stageDecodeMs": Self.ms(stageDecodeUs),
+            "stageGlassMs": Self.ms(stageGlassUs),
+            "offsetMs": Double(clockOffsetUs) / 1000.0,
+            "rttMs": Double(rttUs) / 1000.0,
+            "clockSkew": clockSuspect ? 1 : 0,
         ])
     }
 
@@ -756,12 +1001,26 @@ final class ReceiverHub {
     private static func nowUs() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1_000_000)
     }
+
+    private static func ms(_ us: Int64) -> Double {
+        us < 0 ? -1 : Double(us) / 1000.0
+    }
+}
+
+struct FrameTiming {
+    var captureUs: UInt64 = 0
+    var encoderInUs: UInt64 = 0
+    var encoderOutUs: UInt64 = 0
+    var sendUs: UInt64 = 0
+    var recvUs: UInt64 = 0
+
+    static let zero = FrameTiming()
 }
 
 private struct HeldFrame {
     let sample: CMSampleBuffer
     let keyframe: Bool
-    let captureHostUs: UInt64
+    let timing: FrameTiming
     let sequence: UInt16
     let ptsUs: UInt64
     let flushBefore: Bool
@@ -770,6 +1029,7 @@ private struct HeldFrame {
 private final class DisplayPacer: NSObject {
     var onTick: (() -> Void)?
     private var link: CADisplayLink?
+    var targetTimestamp: CFTimeInterval? { link?.targetTimestamp }
 
     func start() {
         guard link == nil else { return }
@@ -789,5 +1049,68 @@ private final class DisplayPacer: NSObject {
 
     @objc private func tick() {
         onTick?()
+    }
+}
+
+private final class PixelDecoder {
+    var onBuffer: ((CVPixelBuffer) -> Void)?
+    private var session: VTDecompressionSession?
+    private var format: CMVideoFormatDescription?
+
+    func update(format: CMVideoFormatDescription) {
+        if let current = self.format, CMFormatDescriptionEqual(current, otherFormatDescription: format) {
+            return
+        }
+        invalidate()
+        self.format = format
+        let attributes: [NSString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as NSDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        var callback = VTDecompressionOutputCallbackRecord(
+            decompressionOutputCallback: { refcon, _, status, _, imageBuffer, _, _ in
+                guard let refcon, status == noErr, let imageBuffer else { return }
+                let decoder = Unmanaged<PixelDecoder>.fromOpaque(refcon).takeUnretainedValue()
+                decoder.onBuffer?(imageBuffer)
+            },
+            decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
+        )
+        var created: VTDecompressionSession?
+        let status = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            formatDescription: format,
+            decoderSpecification: nil,
+            imageBufferAttributes: attributes as CFDictionary,
+            outputCallback: &callback,
+            decompressionSessionOut: &created
+        )
+        guard status == noErr, let created else {
+            self.session = nil
+            return
+        }
+        VTSessionSetProperty(created, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        session = created
+    }
+
+    func decode(_ sample: CMSampleBuffer, onImage: @escaping (CVPixelBuffer) -> Void) -> OSStatus {
+        guard let session else { return -1 }
+        onBuffer = onImage
+        var flags = VTDecodeInfoFlags()
+        return VTDecompressionSessionDecodeFrame(
+            session,
+            sampleBuffer: sample,
+            flags: [],
+            frameRefcon: nil,
+            infoFlagsOut: &flags
+        )
+    }
+
+    func invalidate() {
+        if let session {
+            VTDecompressionSessionInvalidate(session)
+        }
+        session = nil
+        format = nil
     }
 }

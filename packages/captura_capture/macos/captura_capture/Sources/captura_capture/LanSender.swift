@@ -19,7 +19,10 @@ final class LanSender: NSObject, CaptureMediaSink {
     private let stateLock = NSLock()
 
     private var listener: NWListener?
+    private var udpListener: NWListener?
     private var connection: NWConnection?
+    private var udpPeer: NWConnection?
+    private var lastStageLog = CFTimeInterval(0)
     private var parser = LanStreamParser()
     private var pendingSends = 0
     private var dropUntilKeyframe = false
@@ -65,6 +68,13 @@ final class LanSender: NSObject, CaptureMediaSink {
                 VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: self.bitrate as CFNumber)
             }
         }
+        if smoothChanged {
+            networkQueue.async {
+                let udp = !self.isSmooth() && self.udpPeer != nil
+                self.writeTcp(LanWire.transport(udp: udp), important: true, isKeyframe: false)
+                self.requestKeyframe()
+            }
+        }
     }
 
     func startListening() {
@@ -83,6 +93,7 @@ final class LanSender: NSObject, CaptureMediaSink {
                 }
                 listener.start(queue: self.networkQueue)
                 self.listener = listener
+                self.startUdpListener()
             } catch {
                 lanLog.error("Não abriu a porta \(LanLimits.port, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 self.publish(enabled: false, clients: 0, error: "Não foi possível abrir a porta \(LanLimits.port).")
@@ -95,8 +106,12 @@ final class LanSender: NSObject, CaptureMediaSink {
             self.listening = false
             self.connection?.cancel()
             self.connection = nil
+            self.udpPeer?.cancel()
+            self.udpPeer = nil
             self.listener?.cancel()
             self.listener = nil
+            self.udpListener?.cancel()
+            self.udpListener = nil
             self.parser.reset()
             self.pendingSends = 0
             self.stateLock.lock()
@@ -145,7 +160,8 @@ final class LanSender: NSObject, CaptureMediaSink {
             finishFrame()
             return
         }
-        let token = FrameToken(received: received, captureHostUs: captureHostUs)
+        let encoderInUs = Self.hostUs()
+        let token = FrameToken(received: received, captureHostUs: captureHostUs, encoderInUs: encoderInUs)
         let refcon = Unmanaged.passRetained(token).toOpaque()
         var flags = VTEncodeInfoFlags()
         let force = takeKeyframeRequest()
@@ -165,7 +181,12 @@ final class LanSender: NSObject, CaptureMediaSink {
             Unmanaged<FrameToken>.fromOpaque(refcon).release()
             finishFrame()
             lanLog.error("EncodeFrame falhou: \(status, privacy: .public)")
+            return
         }
+        // Ultra keeps a single encode in flight. Without this flush, VideoToolbox
+        // holds the frame until the next EncodeFrame, which never comes, and the
+        // picture sits for about 100 ms. Suave flushes too; it does not add delay.
+        VTCompressionSessionCompleteFrames(compression, untilPresentationTimeStamp: .invalid)
     }
 
     private func createEncoder(width: Int, height: Int) -> Bool {
@@ -232,6 +253,9 @@ final class LanSender: NSObject, CaptureMediaSink {
         let delayStatus = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         if delayStatus != noErr {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber)
+            lanLog.error("MaxFrameDelayCount 0 recusado (\(delayStatus, privacy: .public)); ficou em 1")
+        } else {
+            lanLog.info("MaxFrameDelayCount 0 aplicado")
         }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         VTCompressionSessionPrepareToEncodeFrames(session)
@@ -261,6 +285,7 @@ final class LanSender: NSObject, CaptureMediaSink {
         }
         let received = token?.received ?? CACurrentMediaTime()
         let captureHostUs = token?.captureHostUs ?? Self.hostUs()
+        let encoderInUs = token?.encoderInUs ?? captureHostUs
         guard status == noErr, let sampleBuffer else { return }
         let latencyUs = UInt32(max(0, (CACurrentMediaTime() - received) * 1_000_000))
         guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
@@ -278,15 +303,17 @@ final class LanSender: NSObject, CaptureMediaSink {
             ? UInt64(max(0, CMTimeConvertScale(pts, timescale: 1_000_000, method: .roundHalfAwayFromZero).value))
             : 0
         let sequence = nextSequence()
-        let message = LanWire.videoFrame(
+        let encoderOutUs = Self.hostUs()
+        emitVideo(
             keyframe: keyframe,
             sequence: sequence,
             ptsUs: ptsUs,
             senderLatencyUs: latencyUs,
             captureHostUs: captureHostUs,
+            encoderInUs: encoderInUs,
+            encoderOutUs: encoderOutUs,
             nalus: nalus
         )
-        send(message, important: false, isKeyframe: keyframe)
     }
 
     private func configMessage(from format: CMFormatDescription) -> Data? {
@@ -406,7 +433,8 @@ final class LanSender: NSObject, CaptureMediaSink {
             switch state {
             case .ready:
                 self.requestKeyframe()
-                self.send(LanWire.helloAck(features: LanFeatures.video), important: true)
+                self.send(LanWire.helloAck(features: LanFeatures.video | LanFeatures.udp), important: true)
+                self.send(LanWire.transport(udp: false), important: true)
                 self.stateLock.lock()
                 let config = self.cachedConfig
                 self.stateLock.unlock()
@@ -465,6 +493,8 @@ final class LanSender: NSObject, CaptureMediaSink {
                 case LanType.input:
                     // Reserved for a later controller. Do not buffer or act on it.
                     break
+                case LanType.keyframeRequest:
+                    requestKeyframe()
                 case LanType.bye:
                     connection?.cancel()
                 default:
@@ -476,8 +506,79 @@ final class LanSender: NSObject, CaptureMediaSink {
         }
     }
 
+    private func emitVideo(
+        keyframe: Bool,
+        sequence: UInt16,
+        ptsUs: UInt64,
+        senderLatencyUs: UInt32,
+        captureHostUs: UInt64,
+        encoderInUs: UInt64,
+        encoderOutUs: UInt64,
+        nalus: Data
+    ) {
+        networkQueue.async {
+            let sendUs = Self.hostUs()
+            self.logSenderStages(captureUs: captureHostUs, encoderInUs: encoderInUs, encoderOutUs: encoderOutUs, sendUs: sendUs)
+            if self.isSmooth() {
+                let message = LanWire.videoFrame(
+                    keyframe: keyframe,
+                    sequence: sequence,
+                    ptsUs: ptsUs,
+                    senderLatencyUs: senderLatencyUs,
+                    captureHostUs: captureHostUs,
+                    encoderInUs: encoderInUs,
+                    encoderOutUs: encoderOutUs,
+                    sendUs: sendUs,
+                    nalus: nalus
+                )
+                self.writeTcp(message, important: false, isKeyframe: keyframe)
+                return
+            }
+            guard let peer = self.udpPeer else {
+                let message = LanWire.videoFrame(
+                    keyframe: keyframe,
+                    sequence: sequence,
+                    ptsUs: ptsUs,
+                    senderLatencyUs: senderLatencyUs,
+                    captureHostUs: captureHostUs,
+                    encoderInUs: encoderInUs,
+                    encoderOutUs: encoderOutUs,
+                    sendUs: sendUs,
+                    nalus: nalus
+                )
+                self.writeTcp(message, important: false, isKeyframe: keyframe)
+                return
+            }
+            let timing = UdpTiming(
+                captureUs: captureHostUs,
+                encoderInUs: encoderInUs,
+                encoderOutUs: encoderOutUs,
+                sendUs: sendUs
+            )
+            for packet in LanUdp.packets(frameId: sequence, keyframe: keyframe, timing: timing, nalus: nalus) {
+                peer.send(content: packet, completion: .idempotent)
+            }
+        }
+    }
+
+    private func logSenderStages(captureUs: UInt64, encoderInUs: UInt64, encoderOutUs: UInt64, sendUs: UInt64) {
+        let now = CACurrentMediaTime()
+        guard now - lastStageLog >= 1 else { return }
+        lastStageLog = now
+        let cap = Int64(bitPattern: encoderInUs) - Int64(bitPattern: captureUs)
+        let enc = Int64(bitPattern: encoderOutUs) - Int64(bitPattern: encoderInUs)
+        let tx = Int64(bitPattern: sendUs) - Int64(bitPattern: encoderOutUs)
+        let udp = !self.isSmooth()
+        lanLog.info("Mac cap→enc \(cap / 1000, privacy: .public)ms enc \(enc / 1000, privacy: .public)ms tx \(tx / 1000, privacy: .public)ms udp \(udp, privacy: .public)")
+    }
+
     private func send(_ data: Data, important: Bool, isKeyframe: Bool = false) {
         networkQueue.async {
+            self.writeTcp(data, important: important, isKeyframe: isKeyframe)
+        }
+    }
+
+    private func writeTcp(_ data: Data, important: Bool, isKeyframe: Bool) {
             guard let connection = self.connection else { return }
             if !important {
                 let limit = self.isSmooth() ? 3 : 1
@@ -503,7 +604,63 @@ final class LanSender: NSObject, CaptureMediaSink {
                 return
             }
             connection.send(content: data, completion: .contentProcessed { _ in })
+    }
+
+    private func startUdpListener() {
+        do {
+            let listener = try NWListener(using: udpParameters(), on: NWEndpoint.Port(rawValue: LanLimits.port)!)
+            listener.stateUpdateHandler = { state in
+                if case let .failed(error) = state {
+                    lanLog.error("UDP falhou: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                self?.acceptUdp(connection)
+            }
+            listener.start(queue: networkQueue)
+            udpListener = listener
+        } catch {
+            lanLog.error("Não abriu UDP \(LanLimits.port, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private func acceptUdp(_ connection: NWConnection) {
+        connection.stateUpdateHandler = { _ in }
+        connection.start(queue: networkQueue)
+        receiveUdp(on: connection)
+    }
+
+    private func receiveUdp(on connection: NWConnection) {
+        connection.receiveMessage { [weak self] data, _, _, error in
+            guard let self else { return }
+            if let data, LanUdp.isBind(data) {
+                if self.udpPeer !== connection {
+                    self.udpPeer?.cancel()
+                    self.udpPeer = connection
+                }
+                lanLog.info("iPhone abriu o UDP")
+                let udp = !self.isSmooth()
+                self.writeTcp(LanWire.transport(udp: udp), important: true, isKeyframe: false)
+                self.requestKeyframe()
+            }
+            if let error {
+                lanLog.error("UDP recv: \(error.localizedDescription, privacy: .public)")
+                if self.udpPeer === connection {
+                    self.udpPeer = nil
+                    self.writeTcp(LanWire.transport(udp: false), important: true, isKeyframe: false)
+                }
+                return
+            }
+            self.receiveUdp(on: connection)
+        }
+    }
+
+    private func udpParameters() -> NWParameters {
+        let parameters = NWParameters.udp
+        parameters.includePeerToPeer = true
+        parameters.allowLocalEndpointReuse = true
+        parameters.serviceClass = .interactiveVideo
+        return parameters
     }
 
     private func tcpParameters() -> NWParameters {
@@ -546,8 +703,10 @@ final class LanSender: NSObject, CaptureMediaSink {
 private final class FrameToken {
     let received: CFTimeInterval
     let captureHostUs: UInt64
-    init(received: CFTimeInterval, captureHostUs: UInt64) {
+    let encoderInUs: UInt64
+    init(received: CFTimeInterval, captureHostUs: UInt64, encoderInUs: UInt64) {
         self.received = received
         self.captureHostUs = captureHostUs
+        self.encoderInUs = encoderInUs
     }
 }

@@ -27,6 +27,8 @@ void main() {
     expect(decoded.ptsUs, 1500);
     expect(decoded.senderLatencyUs, 4200);
     expect(decoded.captureHostUs, 9000);
+    expect(decoded.encoderInUs, 0);
+    expect(decoded.sendUs, 0);
     expect(decoded.nalus, frame.nalus);
   });
 
@@ -206,5 +208,104 @@ void main() {
     );
     expect(normalizeStreamHeight(480), 720);
     expect(normalizeStreamHeight(1080), 1080);
+  });
+
+  test('carimbos do quadro, UDP e o relógio', () {
+    final frame = LanVideoFrame(
+      keyframe: false,
+      sequence: 4,
+      ptsUs: 30,
+      senderLatencyUs: 8,
+      captureHostUs: 1000,
+      encoderInUs: 1100,
+      encoderOutUs: 4500,
+      sendUs: 4600,
+      nalus: Uint8List.fromList([9, 9]),
+    );
+    final decoded = LanVideoFrame.decode(frame.encode());
+    expect(decoded.encoderInUs, 1100);
+    expect(decoded.encoderOutUs, 4500);
+    expect(decoded.sendUs, 4600);
+    expect(decoded.nalus, frame.nalus);
+    expect(decoded.encode().length, LanVideoFrame.prefixSize + 2);
+
+    final stages = stageDurations(
+      captureUs: 1000,
+      encoderInUs: 1100,
+      encoderOutUs: 4500,
+      sendUs: 4600,
+      recvUs: 2000,
+      decodeSubmitUs: 2100,
+      decodedUs: 2800,
+      glassUs: 3000,
+      offsetUs: 3000,
+    );
+    expect(stages.captureToEncoderUs, 100);
+    expect(stages.encodeUs, 3400);
+    expect(stages.sendQueueUs, 100);
+    expect(stages.networkUs, 400);
+    expect(stages.decodeUs, 700);
+    expect(stages.toGlassUs, 200);
+    expect(stages.totalUs, 5000);
+
+    expect(
+      roundTripUs(
+        clientSendUs: 1000,
+        serverRecvUs: 5000,
+        serverSendUs: 5200,
+        clientRecvUs: 2500,
+      ),
+      1300,
+    );
+    expect(clockOffsetLooksSkewed(offsetUs: 100000, rttUs: 2000), isTrue);
+    expect(clockOffsetLooksSkewed(offsetUs: 400, rttUs: 2000), isFalse);
+
+    final timing = UdpTiming(
+      captureUs: 10,
+      encoderInUs: 20,
+      encoderOutUs: 30,
+      sendUs: 40,
+    );
+    final nalus = Uint8List.fromList(
+      List<int>.generate(2000, (index) => index & 0xff),
+    );
+    final packets = packetizeUdpFrame(
+      UdpFrame(frameId: 7, keyframe: true, timing: timing, nalus: nalus),
+    );
+    expect(packets.length, greaterThan(1));
+    for (final packet in packets) {
+      expect(packet.length, lessThanOrEqualTo(UdpDatagram.datagramSize));
+    }
+    final reassembler = UdpReassembler();
+    UdpFrame? assembled;
+    var dropped = false;
+    for (final packet in packets) {
+      final ingest = reassembler.add(packet);
+      dropped = dropped || ingest.droppedIncomplete;
+      assembled ??= ingest.frame;
+    }
+    expect(dropped, isFalse);
+    expect(assembled?.keyframe, isTrue);
+    expect(assembled?.frameId, 7);
+    expect(assembled?.timing.sendUs, 40);
+    expect(assembled?.nalus, nalus);
+
+    final lossy = UdpReassembler();
+    final first = lossy.add(packets.first);
+    expect(first.frame, isNull);
+    final other = packetizeUdpFrame(
+      UdpFrame(
+        frameId: 8,
+        keyframe: false,
+        timing: timing,
+        nalus: Uint8List.fromList([1, 2, 3, 4]),
+      ),
+    );
+    final next = lossy.add(other.single);
+    expect(next.droppedIncomplete, isTrue);
+    expect(next.frame?.nalus, [1, 2, 3, 4]);
+    expect(UdpDatagram.decode(udpBindDatagram()).isBind, isTrue);
+    expect(LanType.keyframeRequest, 0x12);
+    expect(LanType.transport, 0x14);
   });
 }

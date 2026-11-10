@@ -37,6 +37,15 @@ class ReceiverStatsChanged extends ReceiverEvent {
     this.waitingKeyframe = 0,
     this.bitrateMbps = 0,
     this.maxFrameQp = 0,
+    this.stageCaptureMs = -1,
+    this.stageEncodeMs = -1,
+    this.stageQueueMs = -1,
+    this.stageNetworkMs = -1,
+    this.stageDecodeMs = -1,
+    this.stageGlassMs = -1,
+    this.offsetMs = 0,
+    this.rttMs = 0,
+    this.clockSkew = false,
   });
 
   final double fps;
@@ -49,6 +58,15 @@ class ReceiverStatsChanged extends ReceiverEvent {
   final int waitingKeyframe;
   final int bitrateMbps;
   final int maxFrameQp;
+  final double stageCaptureMs;
+  final double stageEncodeMs;
+  final double stageQueueMs;
+  final double stageNetworkMs;
+  final double stageDecodeMs;
+  final double stageGlassMs;
+  final double offsetMs;
+  final double rttMs;
+  final bool clockSkew;
 }
 
 abstract class ReceiverClient {
@@ -144,6 +162,15 @@ ReceiverEvent? _decode(Object? raw) {
       final waitingKeyframe = map['waitingKeyframe'];
       final bitrateMbps = map['bitrateMbps'];
       final maxFrameQp = map['maxFrameQp'];
+      final stageCaptureMs = map['stageCaptureMs'];
+      final stageEncodeMs = map['stageEncodeMs'];
+      final stageQueueMs = map['stageQueueMs'];
+      final stageNetworkMs = map['stageNetworkMs'];
+      final stageDecodeMs = map['stageDecodeMs'];
+      final stageGlassMs = map['stageGlassMs'];
+      final offsetMs = map['offsetMs'];
+      final rttMs = map['rttMs'];
+      final clockSkew = map['clockSkew'];
       return ReceiverStatsChanged(
         fps: fps is num ? fps.toDouble() : 0,
         displayedFps: displayed is num ? displayed.toDouble() : null,
@@ -155,6 +182,15 @@ ReceiverEvent? _decode(Object? raw) {
         waitingKeyframe: waitingKeyframe is num ? waitingKeyframe.toInt() : 0,
         bitrateMbps: bitrateMbps is num ? bitrateMbps.toInt() : 0,
         maxFrameQp: maxFrameQp is num ? maxFrameQp.toInt() : 0,
+        stageCaptureMs: stageCaptureMs is num ? stageCaptureMs.toDouble() : -1,
+        stageEncodeMs: stageEncodeMs is num ? stageEncodeMs.toDouble() : -1,
+        stageQueueMs: stageQueueMs is num ? stageQueueMs.toDouble() : -1,
+        stageNetworkMs: stageNetworkMs is num ? stageNetworkMs.toDouble() : -1,
+        stageDecodeMs: stageDecodeMs is num ? stageDecodeMs.toDouble() : -1,
+        stageGlassMs: stageGlassMs is num ? stageGlassMs.toDouble() : -1,
+        offsetMs: offsetMs is num ? offsetMs.toDouble() : 0,
+        rttMs: rttMs is num ? rttMs.toDouble() : 0,
+        clockSkew: clockSkew == 1 || clockSkew == true,
       );
     default:
       return null;

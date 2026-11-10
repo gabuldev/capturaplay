@@ -72,6 +72,15 @@ class ReceiverController extends ChangeNotifier {
   int waitingKeyframe = 0;
   int bitrateMbps = 0;
   int maxFrameQp = 0;
+  double stageCaptureMs = -1;
+  double stageEncodeMs = -1;
+  double stageQueueMs = -1;
+  double stageNetworkMs = -1;
+  double stageDecodeMs = -1;
+  double stageGlassMs = -1;
+  double offsetMs = 0;
+  double rttMs = 0;
+  bool clockSkew = false;
   bool showStats = false;
   bool smooth = true;
   bool chrome = true;
@@ -101,6 +110,15 @@ class ReceiverController extends ChangeNotifier {
           waitingKeyframe = 0;
           bitrateMbps = 0;
           maxFrameQp = 0;
+          stageCaptureMs = -1;
+          stageEncodeMs = -1;
+          stageQueueMs = -1;
+          stageNetworkMs = -1;
+          stageDecodeMs = -1;
+          stageGlassMs = -1;
+          offsetMs = 0;
+          rttMs = 0;
+          clockSkew = false;
         }
       case ReceiverStatsChanged(
         :final fps,
@@ -113,6 +131,15 @@ class ReceiverController extends ChangeNotifier {
         :final waitingKeyframe,
         :final bitrateMbps,
         :final maxFrameQp,
+        :final stageCaptureMs,
+        :final stageEncodeMs,
+        :final stageQueueMs,
+        :final stageNetworkMs,
+        :final stageDecodeMs,
+        :final stageGlassMs,
+        :final offsetMs,
+        :final rttMs,
+        :final clockSkew,
       ):
         this.fps = fps;
         this.displayedFps = displayedFps;
@@ -124,6 +151,15 @@ class ReceiverController extends ChangeNotifier {
         this.waitingKeyframe = waitingKeyframe;
         this.bitrateMbps = bitrateMbps;
         this.maxFrameQp = maxFrameQp;
+        this.stageCaptureMs = stageCaptureMs;
+        this.stageEncodeMs = stageEncodeMs;
+        this.stageQueueMs = stageQueueMs;
+        this.stageNetworkMs = stageNetworkMs;
+        this.stageDecodeMs = stageDecodeMs;
+        this.stageGlassMs = stageGlassMs;
+        this.offsetMs = offsetMs;
+        this.rttMs = rttMs;
+        this.clockSkew = clockSkew;
     }
     notifyListeners();
   }
@@ -216,6 +252,15 @@ class _ReceiverPageState extends State<ReceiverPage> {
                     waitingKeyframe: controller.waitingKeyframe,
                     bitrateMbps: controller.bitrateMbps,
                     maxFrameQp: controller.maxFrameQp,
+                    stageCaptureMs: controller.stageCaptureMs,
+                    stageEncodeMs: controller.stageEncodeMs,
+                    stageQueueMs: controller.stageQueueMs,
+                    stageNetworkMs: controller.stageNetworkMs,
+                    stageDecodeMs: controller.stageDecodeMs,
+                    stageGlassMs: controller.stageGlassMs,
+                    offsetMs: controller.offsetMs,
+                    rttMs: controller.rttMs,
+                    clockSkew: controller.clockSkew,
                   ),
                 ),
             ],
@@ -392,6 +437,17 @@ class _ConnectedChrome extends StatelessWidget {
   }
 }
 
+String _ms(double value) {
+  if (value < 0) return '—';
+  return value.round().toString();
+}
+
+String _signed(double value) {
+  final rounded = value.round();
+  if (rounded > 0) return '+$rounded';
+  return '$rounded';
+}
+
 class _Stats extends StatelessWidget {
   const _Stats({
     required this.fps,
@@ -404,6 +460,15 @@ class _Stats extends StatelessWidget {
     required this.waitingKeyframe,
     required this.bitrateMbps,
     required this.maxFrameQp,
+    required this.stageCaptureMs,
+    required this.stageEncodeMs,
+    required this.stageQueueMs,
+    required this.stageNetworkMs,
+    required this.stageDecodeMs,
+    required this.stageGlassMs,
+    required this.offsetMs,
+    required this.rttMs,
+    required this.clockSkew,
   });
 
   final double? fps;
@@ -416,6 +481,15 @@ class _Stats extends StatelessWidget {
   final int waitingKeyframe;
   final int bitrateMbps;
   final int maxFrameQp;
+  final double stageCaptureMs;
+  final double stageEncodeMs;
+  final double stageQueueMs;
+  final double stageNetworkMs;
+  final double stageDecodeMs;
+  final double stageGlassMs;
+  final double offsetMs;
+  final double rttMs;
+  final bool clockSkew;
 
   @override
   Widget build(BuildContext context) {
@@ -467,8 +541,23 @@ class _Stats extends StatelessWidget {
                   : 'taxa do encoder indisponível',
               style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
             ),
+            Text(
+              'cap ${_ms(stageCaptureMs)} · enc ${_ms(stageEncodeMs)} · tx ${_ms(stageQueueMs)} · rede ${_ms(stageNetworkMs)}',
+              style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
+            ),
+            Text(
+              'dec ${_ms(stageDecodeMs)} · vidro ${_ms(stageGlassMs)}',
+              style: const TextStyle(color: CapturaColors.muted, fontSize: 10),
+            ),
+            Text(
+              'off ${_signed(offsetMs)} · rtt ${_ms(rttMs)}${clockSkew ? ' · relógio' : ''}',
+              style: TextStyle(
+                color: clockSkew ? CapturaColors.brass : CapturaColors.muted,
+                fontSize: 10,
+              ),
+            ),
             const Text(
-              'captura → tela',
+              'captura → vidro',
               style: TextStyle(color: CapturaColors.muted, fontSize: 10),
             ),
           ],
