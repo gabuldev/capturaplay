@@ -95,6 +95,12 @@ class ReceiverController extends ChangeNotifier {
 
   bool get connected => phase == 'connected';
 
+  final _Pulse _stats = _Pulse();
+
+  /// Fires when any stats field changes. Listen to this, not the controller,
+  /// to show stats without rebuilding the whole page.
+  Listenable get statsListenable => _stats;
+
   Future<void> start() async {
     _subscription ??= client.events.listen(_onEvent);
     await client.start();
@@ -192,7 +198,11 @@ class ReceiverController extends ChangeNotifier {
         this.digest = digest;
         this.linkHint = linkHint;
         this.frameHeight = frameHeight;
+        // Stats arrive at 4 Hz. Only the stats panel listens to them.
+        _stats.ping();
+        return;
     }
+    _stats.ping();
     notifyListeners();
   }
 
@@ -226,6 +236,7 @@ class ReceiverController extends ChangeNotifier {
   void dispose() {
     _subscription?.cancel();
     unawaited(client.stop());
+    _stats.dispose();
     super.dispose();
   }
 }
@@ -273,34 +284,39 @@ class _ReceiverPageState extends State<ReceiverPage> {
                 Positioned(
                   top: 16,
                   right: 16,
-                  child: _Stats(
-                    fps: controller.fps,
-                    displayedFps: controller.displayedFps,
-                    latencyMs: controller.latencyMs,
-                    dropped: controller.droppedFrames,
-                    receiverDrops: controller.receiverDrops,
-                    bufferDepth: controller.bufferDepth,
-                    decoderErrors: controller.decoderErrors,
-                    waitingKeyframe: controller.waitingKeyframe,
-                    bitrateMbps: controller.bitrateMbps,
-                    maxFrameQp: controller.maxFrameQp,
-                    stageCaptureMs: controller.stageCaptureMs,
-                    stageEncodeMs: controller.stageEncodeMs,
-                    stageQueueMs: controller.stageQueueMs,
-                    stageNetworkMs: controller.stageNetworkMs,
-                    stageDecodeMs: controller.stageDecodeMs,
-                    stageGlassMs: controller.stageGlassMs,
-                    offsetMs: controller.offsetMs,
-                    rttMs: controller.rttMs,
-                    clockSkew: controller.clockSkew,
-                    latP50Ms: controller.latP50Ms,
-                    latP95Ms: controller.latP95Ms,
-                    latMaxMs: controller.latMaxMs,
-                    spikeCount: controller.spikeCount,
-                    spikeStage: controller.spikeStage,
-                    digest: controller.digest,
-                    linkHint: controller.linkHint,
-                    frameHeight: controller.frameHeight,
+                  child: RepaintBoundary(
+                    child: ListenableBuilder(
+                      listenable: controller.statsListenable,
+                      builder: (context, _) => _Stats(
+                        fps: controller.fps,
+                        displayedFps: controller.displayedFps,
+                        latencyMs: controller.latencyMs,
+                        dropped: controller.droppedFrames,
+                        receiverDrops: controller.receiverDrops,
+                        bufferDepth: controller.bufferDepth,
+                        decoderErrors: controller.decoderErrors,
+                        waitingKeyframe: controller.waitingKeyframe,
+                        bitrateMbps: controller.bitrateMbps,
+                        maxFrameQp: controller.maxFrameQp,
+                        stageCaptureMs: controller.stageCaptureMs,
+                        stageEncodeMs: controller.stageEncodeMs,
+                        stageQueueMs: controller.stageQueueMs,
+                        stageNetworkMs: controller.stageNetworkMs,
+                        stageDecodeMs: controller.stageDecodeMs,
+                        stageGlassMs: controller.stageGlassMs,
+                        offsetMs: controller.offsetMs,
+                        rttMs: controller.rttMs,
+                        clockSkew: controller.clockSkew,
+                        latP50Ms: controller.latP50Ms,
+                        latP95Ms: controller.latP95Ms,
+                        latMaxMs: controller.latMaxMs,
+                        spikeCount: controller.spikeCount,
+                        spikeStage: controller.spikeStage,
+                        digest: controller.digest,
+                        linkHint: controller.linkHint,
+                        frameHeight: controller.frameHeight,
+                      ),
+                    ),
                   ),
                 ),
             ],
@@ -656,4 +672,8 @@ class _Stats extends StatelessWidget {
       ),
     );
   }
+}
+
+class _Pulse extends ChangeNotifier {
+  void ping() => notifyListeners();
 }

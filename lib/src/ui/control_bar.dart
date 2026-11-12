@@ -2,6 +2,7 @@ import 'package:captura_capture/captura_capture.dart';
 import 'package:flutter/material.dart';
 
 import '../studio_controller.dart';
+import '../volume.dart';
 import '../theme.dart';
 
 class ControlBar extends StatelessWidget {
@@ -228,7 +229,14 @@ class VolumeControl extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final muted = controller.volume.muted || controller.volume.level == 0;
+    return ValueListenableBuilder<VolumeState>(
+      valueListenable: controller.volumeListenable,
+      builder: (context, volume, _) => _build(volume),
+    );
+  }
+
+  Widget _build(VolumeState volume) {
+    final muted = volume.muted || volume.level == 0;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -241,14 +249,14 @@ class VolumeControl extends StatelessWidget {
         SizedBox(
           width: 128,
           child: Slider(
-            value: controller.volume.level.clamp(0, 1).toDouble(),
+            value: volume.level.clamp(0, 1).toDouble(),
             onChanged: controller.setLevel,
           ),
         ),
         SizedBox(
           width: 40,
           child: Text(
-            formatVolumePercent(controller.volume.effective),
+            formatVolumePercent(volume.effective),
             style: const TextStyle(
               color: CapturaColors.ink,
               fontSize: 12,

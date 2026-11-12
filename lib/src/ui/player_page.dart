@@ -152,14 +152,22 @@ class _PlayerPageState extends State<PlayerPage> {
                           left: 16,
                           right: 16,
                           bottom: 16,
-                          child: ControlBar(controller: controller),
+                          child: RepaintBoundary(
+                            child: ControlBar(controller: controller),
+                          ),
                         ),
                       ],
                       if (controller.statsVisible)
                         Positioned(
                           top: top,
                           right: 16,
-                          child: StatsReadout(stats: controller.stats),
+                          child: RepaintBoundary(
+                            child: ValueListenableBuilder<CaptureStats?>(
+                              valueListenable: controller.statsListenable,
+                              builder: (context, stats, _) =>
+                                  StatsReadout(stats: stats),
+                            ),
+                          ),
                         ),
                       if (controller.running &&
                           (controller.warningCode != null ||

@@ -22,13 +22,25 @@ class StudioController extends ChangeNotifier {
   CaptureDevice? audio;
   VideoFormatOption? format;
   VideoFormatOption? activeFormat;
-  VolumeState volume = VolumeState.full;
+
+  /// Volume and stats change often (slider drags, 4 Hz stats). They live in their
+  /// own notifiers so only the widgets that show them rebuild, not the whole page.
+  final ValueNotifier<VolumeState> volumeListenable = ValueNotifier(
+    VolumeState.full,
+  );
+  final ValueNotifier<CaptureStats?> statsListenable = ValueNotifier(null);
+
+  VolumeState get volume => volumeListenable.value;
+  set volume(VolumeState value) => volumeListenable.value = value;
+
+  CaptureStats? get stats => statsListenable.value;
+  set stats(CaptureStats? value) => statsListenable.value = value;
+
   bool running = false;
   String? errorCode;
   String? errorDetail;
   String? warningCode;
   bool statsVisible = false;
-  CaptureStats? stats;
   bool fullscreen = false;
   bool streaming = false;
   int streamBitrateMbps = 20;
@@ -95,7 +107,6 @@ class StudioController extends ChangeNotifier {
   Future<void> setLevel(double level) async {
     final wasMuted = volume.muted;
     volume = volume.withLevel(level);
-    notifyListeners();
     await client.setVolume(volume.level);
     if (volume.muted != wasMuted) {
       await client.setMuted(volume.muted);
@@ -104,7 +115,6 @@ class StudioController extends ChangeNotifier {
 
   Future<void> toggleMute() async {
     volume = volume.toggleMute();
-    notifyListeners();
     await client.setMuted(volume.muted);
   }
 
@@ -213,6 +223,8 @@ class StudioController extends ChangeNotifier {
   void dispose() {
     _subscription?.cancel();
     unawaited(_release());
+    volumeListenable.dispose();
+    statsListenable.dispose();
     super.dispose();
   }
 
@@ -330,8 +342,7 @@ class StudioController extends ChangeNotifier {
         _applySession(status);
         notifyListeners();
       case StatsChanged(:final stats):
-        this.stats = stats;
-        notifyListeners();
+        if (statsVisible) this.stats = stats;
       case FullScreenChanged(:final fullscreen):
         this.fullscreen = fullscreen;
         notifyListeners();

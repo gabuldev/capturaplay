@@ -33,6 +33,8 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private let audioDataOutput = AVCaptureAudioDataOutput()
     private var audioPreview: AVCaptureAudioPreviewOutput?
     private var videoDataAttached = false
+    /// Whether `videoDataOutput` currently converts to 420v. nil until first attach.
+    private var videoDataConverts: Bool?
     private var audioDataAttached = false
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var activeVideoId: String?
@@ -425,6 +427,7 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
             videoDataOutput.setSampleBufferDelegate(nil, queue: nil)
             videoDataAttached = false
         }
+        videoDataConverts = nil
         if audioDataAttached {
             session.removeOutput(audioDataOutput)
             audioDataOutput.setSampleBufferDelegate(nil, queue: nil)
@@ -436,40 +439,50 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
         endSleepAssertion()
     }
 
+    /// Every begin/commitConfiguration makes the preview hitch and can force a new
+    /// keyframe on the LAN stream, so this only touches the session when something
+    /// must change. The video data output stays attached once added (toggling stats
+    /// or streaming no longer adds/removes it); `stopLocked` detaches it.
     private func refreshDataOutputsLocked() {
         let demand = outputDemand()
+        let convert = demand.encoder && !nativeFormatFeedsEncoder()
+
+        let attachVideo = demand.video && !videoDataAttached
+        // Switching to 420v is required for the encoder. Switching back is not, so a
+        // converting output keeps converting until the session restarts.
+        let retuneVideo = demand.video && videoDataAttached && convert && videoDataConverts != true
+        let attachAudio = demand.audio && !audioDataAttached
+        let detachAudio = !demand.audio && audioDataAttached
+        guard attachVideo || retuneVideo || attachAudio || detachAudio else { return }
+
         session.beginConfiguration()
         defer { session.commitConfiguration() }
 
-        if demand.video {
-            videoDataOutput.alwaysDiscardsLateVideoFrames = true
-            videoDataOutput.setSampleBufferDelegate(self, queue: videoQueue)
-            if demand.encoder && !nativeFormatFeedsEncoder() {
-                videoDataOutput.videoSettings = Self.encoderVideoSettings
+        if attachVideo || retuneVideo {
+            videoDataOutput.videoSettings = convert ? Self.encoderVideoSettings : nil
+            videoDataConverts = convert
+            if convert {
                 captureLog.info("captura converte para 420v antes do encoder")
             } else {
-                videoDataOutput.videoSettings = nil
-                if demand.encoder {
-                    captureLog.info("captura entra no encoder sem conversão de pixel")
-                }
+                captureLog.info("captura entrega frames sem conversão de pixel")
             }
-            if !videoDataAttached, session.canAddOutput(videoDataOutput) {
+        }
+        if attachVideo {
+            videoDataOutput.alwaysDiscardsLateVideoFrames = true
+            videoDataOutput.setSampleBufferDelegate(self, queue: videoQueue)
+            if session.canAddOutput(videoDataOutput) {
                 session.addOutput(videoDataOutput)
                 videoDataAttached = true
             }
-        } else if videoDataAttached {
-            session.removeOutput(videoDataOutput)
-            videoDataOutput.setSampleBufferDelegate(nil, queue: nil)
-            videoDataAttached = false
         }
 
-        if demand.audio {
+        if attachAudio {
             audioDataOutput.setSampleBufferDelegate(self, queue: audioQueue)
-            if !audioDataAttached, session.canAddOutput(audioDataOutput) {
+            if session.canAddOutput(audioDataOutput) {
                 session.addOutput(audioDataOutput)
                 audioDataAttached = true
             }
-        } else if audioDataAttached {
+        } else if detachAudio {
             session.removeOutput(audioDataOutput)
             audioDataOutput.setSampleBufferDelegate(nil, queue: nil)
             audioDataAttached = false
