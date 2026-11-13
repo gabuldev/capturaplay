@@ -1,0 +1,27 @@
+name: interop_lab
+description: >-
+  Laboratório que faz as mesmas operações por MethodChannel, por Pigeon e por
+  chamada direta (dart:ffi) no macOS, para comparar código e custo.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.14.0
+  flutter: '>=3.50.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  meta: ^1.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  pigeon: ^29.0.1
+
+flutter:
+  plugin:
+    platforms:
+      macos:
+        pluginClass: InteropLabPlugin
