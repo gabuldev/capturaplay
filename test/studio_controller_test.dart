@@ -162,4 +162,81 @@ void main() {
     expect(client.starts, isNotEmpty);
     controller.dispose();
   });
+
+  test('Cam Link que cai do USB volta sozinho quando reaparece', () async {
+    final client = readyClient();
+    final controller = StudioController(
+      client: client,
+      recoverDelay: Duration.zero,
+    );
+    await controller.bootstrap();
+    expect(controller.video?.id, 'cam');
+
+    client.videos = const [faceTime];
+    client.emit(const DevicesChanged(video: [faceTime], audio: [mic]));
+    await pumpEventQueue();
+    expect(controller.video?.id, 'face');
+
+    client.videos = const [faceTime, camLink];
+    client.emit(
+      const DevicesChanged(video: [faceTime, camLink], audio: [mic, camAudio]),
+    );
+    await pumpEventQueue();
+
+    expect(controller.video?.id, 'cam');
+    expect(controller.format?.id, '1080p60');
+    expect(client.starts.last.videoDeviceId, 'cam');
+    controller.dispose();
+  });
+
+  test('sessão que cai com o aparelho presente tenta de novo', () async {
+    final client = readyClient();
+    final controller = StudioController(
+      client: client,
+      recoverDelay: Duration.zero,
+    );
+    await controller.bootstrap();
+    final startsBefore = client.starts.length;
+
+    client.emit(
+      const SessionChanged(
+        SessionStatus(
+          running: false,
+          errorCode: 'session-failed',
+          errorDetail: 'Cannot Use Cam Link 4K',
+        ),
+      ),
+    );
+    await pumpEventQueue();
+
+    expect(client.starts.length, startsBefore + 1);
+    expect(controller.running, isTrue);
+    expect(controller.errorCode, isNull);
+    controller.dispose();
+  });
+
+  test('desiste depois de 3 tentativas seguidas', () async {
+    final client = readyClient();
+    final controller = StudioController(
+      client: client,
+      recoverDelay: Duration.zero,
+    );
+    await controller.bootstrap();
+    client.startFailure = const CaptureFailure(
+      code: 'session-failed',
+      detail: 'Cannot Use Cam Link 4K',
+    );
+    final startsBefore = client.starts.length;
+
+    client.emit(
+      const SessionChanged(
+        SessionStatus(running: false, errorCode: 'session-failed'),
+      ),
+    );
+    await pumpEventQueue();
+
+    expect(client.starts.length, startsBefore + 3);
+    expect(controller.errorCode, 'session-failed');
+    controller.dispose();
+  });
 }

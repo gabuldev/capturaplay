@@ -6,12 +6,23 @@ import 'package:flutter/foundation.dart';
 import 'volume.dart';
 
 class StudioController extends ChangeNotifier {
-  StudioController({required this.client});
+  StudioController({
+    required this.client,
+    this.recoverDelay = const Duration(seconds: 1),
+  });
 
   final CaptureClient client;
 
+  /// Wait before reopening a capturer that dropped. A Cam Link that just
+  /// re-enumerated on USB refuses to stream for a moment.
+  final Duration recoverDelay;
+  static const _maxRecoverAttempts = 3;
+  static const _recoverableErrors = {'session-failed', 'device-busy'};
+
   StreamSubscription<CaptureEvent>? _subscription;
   int _revision = 0;
+  int _recoverAttempts = 0;
+  bool _disposed = false;
 
   bool initializing = true;
   AuthorizationState authorization = AuthorizationState.unknown;
@@ -81,9 +92,13 @@ class StudioController extends ChangeNotifier {
     }
   }
 
-  Future<void> retry() => _loadFormatsAndStart();
+  Future<void> retry() {
+    _recoverAttempts = 0;
+    return _loadFormatsAndStart();
+  }
 
   Future<void> chooseVideo(String id) async {
+    _recoverAttempts = 0;
     preferredVideoId = id;
     await _loadFormatsAndStart();
   }
@@ -221,6 +236,7 @@ class StudioController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _subscription?.cancel();
     unawaited(_release());
     volumeListenable.dispose();
@@ -295,9 +311,15 @@ class StudioController extends ChangeNotifier {
         notifyListeners();
         return;
       }
-      preferredVideoId = video!.id;
-      preferredFormatId = format!.id;
-      if (!audioDisabled) preferredAudioId = audio?.id;
+      // A fallback camera (the Cam Link dropped off USB) must not overwrite
+      // the remembered choice, or the Cam Link is never picked again.
+      final fallback =
+          preferredVideoId != null && video!.id != preferredVideoId;
+      if (!fallback) {
+        preferredVideoId = video!.id;
+        preferredFormatId = format!.id;
+        if (!audioDisabled) preferredAudioId = audio?.id;
+      }
       final status = await client.start(
         StartRequest(
           videoDeviceId: video!.id,
@@ -316,8 +338,30 @@ class StudioController extends ChangeNotifier {
       running = false;
       errorCode = error.code;
       errorDetail = error.detail;
+      _recoverSoon();
     }
     notifyListeners();
+  }
+
+  /// Reopens the session after a runtime drop, a few times at most, so a
+  /// USB hiccup mid-stream does not leave a black screen until someone clicks.
+  void _recoverSoon() {
+    if (!_recoverableErrors.contains(errorCode)) return;
+    if (_recoverAttempts >= _maxRecoverAttempts) return;
+    final current = video?.id;
+    if (current == null || !videoDevices.any((d) => d.id == current)) return;
+    _recoverAttempts++;
+    _restartSoon();
+  }
+
+  void _restartSoon() {
+    final revision = _revision;
+    unawaited(
+      Future<void>.delayed(recoverDelay, () async {
+        if (_disposed || revision != _revision) return;
+        await _loadFormatsAndStart();
+      }),
+    );
   }
 
   void _handleEvent(CaptureEvent event) {
@@ -334,13 +378,25 @@ class StudioController extends ChangeNotifier {
             authorization.granted &&
             errorCode == null &&
             !initializing;
+        final remembered = preferredVideoId;
+        final returned =
+            !gone &&
+            remembered != null &&
+            (previousId != remembered || errorCode != null) &&
+            videoDevices.any((device) => device.id == remembered) &&
+            authorization.granted &&
+            !initializing;
         notifyListeners();
         if (gone || arrived) {
           unawaited(_loadFormatsAndStart());
+        } else if (returned) {
+          _recoverAttempts = 0;
+          _restartSoon();
         }
       case SessionChanged(:final status):
         _applySession(status);
         notifyListeners();
+        _recoverSoon();
       case StatsChanged(:final stats):
         if (statsVisible) this.stats = stats;
       case FullScreenChanged(:final fullscreen):
@@ -374,6 +430,7 @@ class StudioController extends ChangeNotifier {
 
   void _applySession(SessionStatus status) {
     running = status.running;
+    if (status.running) _recoverAttempts = 0;
     if (status.activeFormat != null) {
       activeFormat = status.activeFormat;
     } else if (!status.running) {
