@@ -23,6 +23,10 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
     weak var delegate: CaptureEngineDelegate?
 
     private let session = AVCaptureSession()
+    /// Audio runs in its own session. Sharing one session lets AVFoundation hold
+    /// the video preview back to stay in sync with the audio preview output,
+    /// whose buffer grows over time, so the picture lagged behind the console.
+    private let audioSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "dev.capturaplay.capture.session", qos: .userInteractive)
     private let videoQueue = DispatchQueue(label: "dev.capturaplay.capture.video", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "dev.capturaplay.capture.audio", qos: .userInteractive)
@@ -314,10 +318,7 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
         for input in session.inputs {
             session.removeInput(input)
         }
-        if let audioPreview {
-            session.removeOutput(audioPreview)
-            self.audioPreview = nil
-        }
+        clearAudioSessionLocked()
 
         do {
             try videoDevice.lockForConfiguration()
@@ -361,6 +362,9 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
         if !session.isRunning {
             session.startRunning()
         }
+        if !audioSession.inputs.isEmpty && !audioSession.isRunning {
+            audioSession.startRunning()
+        }
         guard session.isRunning else {
             captureLog.error("A sessão não entrou em execução.")
             stopLocked()
@@ -396,18 +400,41 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
             captureLog.error("Entrada de áudio recusada: \(error.localizedDescription, privacy: .public)")
             return "audio-unavailable"
         }
-        guard session.canAddInput(audioInput) else {
+        audioSession.beginConfiguration()
+        defer { audioSession.commitConfiguration() }
+        guard audioSession.canAddInput(audioInput) else {
             return "audio-unavailable"
         }
-        session.addInput(audioInput)
+        audioSession.addInput(audioInput)
         let preview = AVCaptureAudioPreviewOutput()
         preview.volume = muted ? 0 : Float(min(max(volume, 0), 1))
-        guard session.canAddOutput(preview) else {
+        guard audioSession.canAddOutput(preview) else {
+            audioSession.removeInput(audioInput)
             return "audio-unavailable"
         }
-        session.addOutput(preview)
+        audioSession.addOutput(preview)
         audioPreview = preview
         return nil
+    }
+
+    private func clearAudioSessionLocked() {
+        if audioSession.isRunning {
+            audioSession.stopRunning()
+        }
+        audioSession.beginConfiguration()
+        for input in audioSession.inputs {
+            audioSession.removeInput(input)
+        }
+        if let audioPreview {
+            audioSession.removeOutput(audioPreview)
+            self.audioPreview = nil
+        }
+        if audioDataAttached {
+            audioSession.removeOutput(audioDataOutput)
+            audioDataOutput.setSampleBufferDelegate(nil, queue: nil)
+            audioDataAttached = false
+        }
+        audioSession.commitConfiguration()
     }
 
     private func stopLocked() {
@@ -418,22 +445,14 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
         for input in session.inputs {
             session.removeInput(input)
         }
-        if let audioPreview {
-            session.removeOutput(audioPreview)
-            self.audioPreview = nil
-        }
         if videoDataAttached {
             session.removeOutput(videoDataOutput)
             videoDataOutput.setSampleBufferDelegate(nil, queue: nil)
             videoDataAttached = false
         }
         videoDataConverts = nil
-        if audioDataAttached {
-            session.removeOutput(audioDataOutput)
-            audioDataOutput.setSampleBufferDelegate(nil, queue: nil)
-            audioDataAttached = false
-        }
         session.commitConfiguration()
+        clearAudioSessionLocked()
         activeVideoId = nil
         lastWarning = nil
         endSleepAssertion()
@@ -451,9 +470,24 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
         // Switching to 420v is required for the encoder. Switching back is not, so a
         // converting output keeps converting until the session restarts.
         let retuneVideo = demand.video && videoDataAttached && convert && videoDataConverts != true
-        let attachAudio = demand.audio && !audioDataAttached
+        let attachAudio = demand.audio && !audioDataAttached && !audioSession.inputs.isEmpty
         let detachAudio = !demand.audio && audioDataAttached
-        guard attachVideo || retuneVideo || attachAudio || detachAudio else { return }
+        if attachAudio || detachAudio {
+            audioSession.beginConfiguration()
+            if attachAudio {
+                audioDataOutput.setSampleBufferDelegate(self, queue: audioQueue)
+                if audioSession.canAddOutput(audioDataOutput) {
+                    audioSession.addOutput(audioDataOutput)
+                    audioDataAttached = true
+                }
+            } else {
+                audioSession.removeOutput(audioDataOutput)
+                audioDataOutput.setSampleBufferDelegate(nil, queue: nil)
+                audioDataAttached = false
+            }
+            audioSession.commitConfiguration()
+        }
+        guard attachVideo || retuneVideo else { return }
 
         session.beginConfiguration()
         defer { session.commitConfiguration() }
@@ -474,18 +508,6 @@ public final class CaptureEngine: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 session.addOutput(videoDataOutput)
                 videoDataAttached = true
             }
-        }
-
-        if attachAudio {
-            audioDataOutput.setSampleBufferDelegate(self, queue: audioQueue)
-            if session.canAddOutput(audioDataOutput) {
-                session.addOutput(audioDataOutput)
-                audioDataAttached = true
-            }
-        } else if detachAudio {
-            session.removeOutput(audioDataOutput)
-            audioDataOutput.setSampleBufferDelegate(nil, queue: nil)
-            audioDataAttached = false
         }
     }
 
