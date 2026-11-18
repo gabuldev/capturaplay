@@ -1,44 +1,44 @@
 # CapturaPlay
 
-App de macOS para jogar olhando para um capturador USB (UVC), no caso um Elgato Cam Link 4K, com a menor latência que o AVFoundation entrega. O vídeo ocupa a janela. O áudio do capturador sai nas caixas ou no fone.
+A macOS app for playing games by looking at a USB (UVC) capture card, in this case an Elgato Cam Link 4K, with the lowest latency AVFoundation can deliver. The video fills the window. The capture card's audio goes to your speakers or headphones.
 
-Não há splitter no meio. O HDMI sai do console, entra no Cam Link, e o USB entra no Mac. Esta janela é a tela.
+There is no splitter in between. HDMI leaves the console, goes into the Cam Link, and the USB goes into the Mac. This window is the screen.
 
-O arquivo do app se chama `capturaplay.app`. O nome na Dock e na janela é **CapturaPlay**.
+The app bundle is called `capturaplay.app`. The name in the Dock and on the window is **CapturaPlay**.
 
-## Por que a prévia é este caminho
+## Why the preview takes this path
 
-A imagem não passa pelo registro de texturas do Flutter.
+The image does not go through Flutter's texture registry.
 
-O `AVCaptureVideoPreviewLayer` é a prévia que a Apple desenha dentro da própria sessão de captura. No macOS o Flutter embute platform view por composição híbrida: o `NSView` entra de verdade na hierarquia da janela, e a layer atualiza no relógio do AVFoundation, não no frame seguinte do Impeller. Empurrar `CVPixelBuffer` pelo `FlutterTexture` exigiria um `AVCaptureVideoDataOutput`, pelo menos um quadro a mais, e a entrega do buffer na thread de raster.
+`AVCaptureVideoPreviewLayer` is the preview Apple draws inside the capture session itself. On macOS, Flutter embeds platform views through hybrid composition: the `NSView` really enters the window hierarchy, and the layer updates on AVFoundation's clock, not on Impeller's next frame. Pushing `CVPixelBuffer`s through `FlutterTexture` would require an `AVCaptureVideoDataOutput`, at least one extra frame, and handing the buffer over on the raster thread.
 
-Por isso a prévia é a backing layer de um `NSView` (`PreviewHostView`). O widget `CapturePreview` não pode levar clip, opacidade ou transformada: isso faz o Flutter recompor a view nativa e devolve a latência que este caminho evita.
+That is why the preview is the backing layer of an `NSView` (`PreviewHostView`). The `CapturePreview` widget must not get a clip, opacity or transform: any of those makes Flutter recomposite the native view and brings back the latency this path avoids.
 
-O áudio vai por `AVCaptureAudioPreviewOutput`, direto para a saída padrão do sistema. Não há buffer do lado do app. O tamanho do buffer interno do AVFoundation não é público; se num Mac ele parecer alto demais, o gancho da fase 2 é o lugar para um tap Core Audio com buffer curto. Enquanto isso, este é o caminho mais curto que continua no mesmo relógio da sessão.
+Audio goes through `AVCaptureAudioPreviewOutput`, straight to the system's default output. There is no buffer on the app side. The audio runs in its own `AVCaptureSession`: with the audio preview output in the same session as the video, the picture waited for the audio and the preview lagged noticeably. The size of AVFoundation's internal buffer is not public; if it seems too large on some Mac, the phase 2 hook is the place for a Core Audio tap with a short buffer.
 
-A captura e a tela estão separadas. `CaptureEngine` é dono da `AVCaptureSession`. A layer só recebe a sessão. Buffers de vídeo (NV12 com IOSurface, quando há consumidor) e de áudio (PCM) só saem por `CaptureMediaSink`, e os data outputs só entram na sessão enquanto existe um sink — ou enquanto a sobreposição de dados está ligada. Jogar não paga o custo de um encoder que não está rodando.
+Capture and display are separate. `CaptureEngine` owns the `AVCaptureSession`. The layer only receives the session. Video buffers (NV12 backed by IOSurface, when there is a consumer) and audio buffers (PCM) only leave through `CaptureMediaSink`, and the data outputs only join the session while a sink exists — or while the stats overlay is on. Playing does not pay for an encoder that isn't running.
 
-A sobreposição (tecla `I`) liga um data output que só conta quadros. O número de latência é a diferença entre o PTS do sample e o relógio da sessão no momento em que esse tap recebe o buffer. É uma estimativa do pipeline de captura, e um teto para a prévia, que costuma ser um pouco mais cedo. Valor negativo ou acima de 2 s aparece como "—": o relógio não fechou. Desligue a sobreposição para voltar ao caminho mínimo.
+The overlay (`I` key) turns on a data output that only counts frames. The latency number is the difference between the sample's PTS and the session clock at the moment that tap receives the buffer. It is an estimate of the capture pipeline, and an upper bound for the preview, which usually arrives a little earlier. A negative value or one above 2 s shows as "—": the clocks didn't line up. Turn the overlay off to go back to the minimal path.
 
-Enquanto a sessão está aberta, o processo pede `idleDisplaySleepDisabled`. A tela não apaga. Fechar a tampa ainda pode suspender o Mac.
+While the session is open, the process requests `idleDisplaySleepDisabled`. The display doesn't sleep. Closing the lid can still suspend the Mac.
 
-## Requisitos
+## Requirements
 
-- Mac com macOS 14 ou mais novo
-- Xcode atual, com as ferramentas de linha de comando
-- Flutter stable (este projeto foi gerado com Flutter 3.47.9 e Dart 3.13.7)
-- Capturador UVC. O app escolhe sozinho um dispositivo cujo nome contém "Cam Link"
-- Porta USB 3, USB 4 ou Thunderbolt direto no Mac
+- A Mac running macOS 14 or later
+- Current Xcode, with the command line tools
+- Flutter stable (the project currently builds with Flutter 3.50.0 and Dart 3.14)
+- A UVC capture card. The app picks a device whose name contains "Cam Link" on its own
+- A USB 3, USB 4 or Thunderbolt port directly on the Mac
 
-O Flutter deste repositório usa Swift Package Manager para o plugin, que é o padrão do stable atual. Se o Flutter local tiver isso desligado:
+This repository's Flutter setup uses Swift Package Manager for the plugin, which is the default on current stable. If your local Flutter has it turned off:
 
 ```bash
 flutter config --enable-swift-package-manager
 ```
 
-## Compilar e rodar
+## Build and run
 
-Na raiz do repositório:
+From the repository root:
 
 ```bash
 flutter pub get
@@ -52,167 +52,159 @@ flutter build macos
 open build/macos/Build/Products/Release/capturaplay.app
 ```
 
-Na primeira abertura o sistema pede câmera e microfone. As duas permissões são do capturador: o vídeo entra como câmera USB e o som entra como entrada de áudio. Não é o microfone do Mac, a menos que você o escolha na barra.
+On first launch the system asks for camera and microphone access. Both permissions belong to the capture card: the video comes in as a USB camera and the sound comes in as an audio input. It is not the Mac's microphone, unless you pick it in the bar.
 
-Textos no `Info.plist`:
+Strings in `Info.plist`:
 
 - `NSCameraUsageDescription`
 - `NSMicrophoneUsageDescription`
 
-Sandbox, nos entitlements de Debug e Release:
+Sandbox, in the Debug and Release entitlements:
 
 - `com.apple.security.device.camera`
 - `com.apple.security.device.audio-input`
 
-Para conferir o binário:
+To check the binary:
 
 ```bash
 codesign -d --entitlements :- build/macos/Build/Products/Release/capturaplay.app
 ```
 
-Se o diálogo não aparecer, abra Ajustes do Sistema → Privacidade e Segurança → Câmera e Microfone, e autorize o CapturaPlay. O botão "Abrir Ajustes do Sistema" na tela de permissão tenta esse painel.
+If the dialog doesn't appear, open System Settings → Privacy & Security → Camera and Microphone, and allow CapturaPlay. The "Open System Settings" button on the permission screen tries to open that pane.
 
-A última escolha de vídeo, áudio, formato, volume e mudo fica no `UserDefaults`. Na primeira vez, sem memória, entra o dispositivo com "Cam Link" no nome e o formato 1920×1080 @ 60 fps, se o hardware oferecer. O microfone interno nunca é escolhido sozinho.
+The last choice of video, audio, format, volume and mute is stored in `UserDefaults`. The first time, with nothing remembered, the app picks the device with "Cam Link" in its name and 1920×1080 @ 60 fps, if the hardware offers it. The built-in microphone is never picked on its own.
 
-## Ligar o console em 1080p sem HDCP
+If the Cam Link drops off USB and comes back, the app waits 1 s and reopens it by itself. If the session fails while the device is still connected, it retries up to 3 times in a row.
 
-O Cam Link 4K, neste uso, quer 1080p60 SDR. 4K nele é 30 fps. 120 Hz e VRR não são o modo estável dessa placa.
+## Setting the console to 1080p without HDCP
 
-Cabo, sem splitter e sem TV no caminho:
+For this use, the Cam Link 4K wants 1080p60 SDR. 4K on it is 30 fps. 120 Hz and VRR are not a stable mode for this card.
 
-1. HDMI out do console → HDMI in do Cam Link.
-2. USB do Cam Link → porta USB 3 do Mac, direto.
+Cabling, with no splitter and no TV in the path:
 
-No console (os nomes abaixo são os da interface em português; em inglês é Settings → Screen and Video → Video Output, e Settings → System → HDMI):
+1. Console HDMI out → Cam Link HDMI in.
+2. Cam Link USB → a USB 3 port on the Mac, directly.
 
-1. Ajustes → Tela e Vídeo → Saída de Vídeo → Resolução → **1080p**.
-2. Saída de 120 Hz → **Desligada**.
-3. VRR → **Desligado**.
-4. HDR → **Desligado**. O alvo daqui é 1080p SDR. HDR empurra outro modo e não ajuda a latência.
-5. Ajustes → Sistema → HDMI → HDCP → **Desligado**.
+On the console:
 
-HDCP desligado é o interruptor do próprio console para captura. Sem isso o capturador recebe uma imagem protegida e a janela fica preta ou numa tela de erro. Jogos seguem. Apps de streaming do console podem recusar abrir enquanto o HDCP está desligado; isso é o comportamento esperado do console, não um defeito do app.
+1. Settings → Screen and Video → Video Output → Resolution → **1080p**.
+2. 120 Hz Output → **Off**.
+3. VRR → **Off**.
+4. HDR → **Off**. The target here is 1080p SDR. HDR pushes a different mode and doesn't help latency.
+5. Settings → System → HDMI → HDCP → **Off**.
 
-Se a imagem não travar em 1080p60, escolha o formato na barra. O chip no alto mostra o formato que a sessão realmente ativou.
+Turning HDCP off is the console's own switch for capture. Without it the capture card receives a protected image and the window stays black or shows an error screen. Games keep working. Streaming apps on the console may refuse to open while HDCP is off; that is the console's expected behavior, not a bug in this app.
 
-## Usar junto com o OBS
+If the image doesn't lock to 1080p60, pick the format in the bar. The chip at the top shows the format the session actually activated.
 
-Um dispositivo UVC tem um fluxo de vídeo ativo. No macOS o `UVCAssistant` segura a interface USB e os apps falam com ele pelo CoreMedia. Na prática o Cam Link não fica estável com o OBS e outro `AVCaptureSession` ao mesmo tempo: o segundo falha, fica sem quadro, ou os dois renegociam o formato e a imagem pisca. A propriedade `isInUseByAnotherApplication` não serve de sentinela — ela marca trava exclusiva de configuração, não "tem uma sessão aberta". Trate como um único dono.
+## Using it together with OBS
 
-O dono tem de ser este app. Quem joga olha para o `AVCaptureVideoPreviewLayer`. O atraso de uma captura de janela fica no stream, onde o OBS já segura buffer. O contrário (OBS dono do Cam Link, e este app filmando a prévia do OBS) põe esse atraso na frente de quem está jogando.
+A UVC device has one active video stream. On macOS, `UVCAssistant` holds the USB interface and apps talk to it through CoreMedia. In practice the Cam Link isn't stable with OBS and another `AVCaptureSession` at the same time: the second one fails, gets no frames, or both renegotiate the format and the image flickers. The `isInUseByAnotherApplication` property is no use as a sentinel — it flags an exclusive configuration lock, not "a session is open". Treat it as having a single owner.
+
+The owner has to be this app. Whoever is playing looks at the `AVCaptureVideoPreviewLayer`. The delay of a window capture ends up in the stream, where OBS already holds a buffer. The other way around (OBS owning the Cam Link, and this app filming OBS's preview) puts that delay in front of the player.
 
 ```
 console --HDMI--> Cam Link --USB--> CapturaPlay
-                                      |  prévia nativa (você joga aqui)
-                                      |  áudio direto na saída do Mac
+                                      |  native preview (you play here)
+                                      |  audio straight to the Mac's output
                                       v
-                                    OBS captura a JANELA do CapturaPlay
+                                    OBS captures the CapturaPlay WINDOW
                                       |
                                       v
-                                    live / gravação
+                                    live stream / recording
 ```
 
-No OBS:
+In OBS:
 
-1. Não crie fonte "Dispositivo de captura de vídeo" no Cam Link. Se já existir, apague e reinicie o OBS para ele soltar o USB.
-2. Fonte **Captura de tela do macOS**, modo **Captura de janela**, janela **CapturaPlay**.
-3. O OBS vai pedir permissão de Gravação de Tela. Isso é do OBS, não deste app.
-4. Captura de janela evita que notificação do macOS entre no stream. Captura de tela inteira também funciona se o CapturaPlay estiver em tela cheia num monitor só dele, mas notificação e menu aparecem no vídeo.
-5. Som: o jogo sai na saída padrão do Mac. No OBS, inclua o áudio dessa captura de tela (macOS 13+) ou uma fonte de áudio do desktop. Use fone. Caixa alta mais microfone regrava o jogo e gera eco.
+1. Don't create a "Video Capture Device" source on the Cam Link. If one exists, delete it and restart OBS so it releases the USB device.
+2. Add a **macOS Screen Capture** source, **Window Capture** mode, window **CapturaPlay**.
+3. OBS will ask for Screen Recording permission. That is for OBS, not for this app.
+4. Window capture keeps macOS notifications out of the stream. Full screen capture also works if CapturaPlay is full screen on a monitor of its own, but notifications and menus show up in the video.
+5. Sound: the game plays on the Mac's default output. In OBS, include that screen capture's audio (macOS 13+) or a desktop audio source. Use headphones. Loud speakers plus a microphone re-record the game and cause echo.
 
-Não use a câmera virtual do OBS como fonte para jogar. Ela acrescenta uma codificação no caminho dos olhos.
+Don't use OBS's virtual camera as the source for playing. It adds an encode in the path to your eyes.
 
-Se o CapturaPlay disser que o dispositivo está em uso, feche a fonte do Cam Link no OBS (ou o outro app) e toque em "Tentar de novo".
+If CapturaPlay says the device is in use, close the Cam Link source in OBS (or the other app) and click "Try again".
 
-## Atalhos
+## Shortcuts
 
-| Ação | Como |
+| Action | How |
 | --- | --- |
-| Tela cheia | `F`, duplo clique na imagem, ou `⌘⌃F` (menu Visualizar) |
-| Mudo | `M` ou o botão de volume |
-| Volume | Slider, ou `↑` / `↓` |
-| Dados (fps e latência estimada) | `I` |
-| Cursor | Some com a barra depois de um instante sem mexer o mouse, e volta no movimento |
+| Full screen | `F`, double-click the image, or `⌘⌃F` (View menu) |
+| Mute | `M` or the volume button |
+| Volume | Slider, or `↑` / `↓` |
+| Stats (fps and estimated latency) | `I` |
+| Cursor | Hides with the bar after a moment without mouse movement, and comes back when you move it |
 
-`Esc` sai da tela cheia, como em qualquer janela do macOS.
+`Esc` leaves full screen, like any macOS window.
 
-## Limitações conhecidas
+## Known limitations
 
-- Um app por vez no Cam Link. Ver a seção do OBS.
-- Conteúdo com HDCP ligado não aparece. O interruptor é o do console.
-- O app não grava e não transmite. A fase 2 está só desenhada.
-- A latência real depende do Cam Link, da porta USB e do macOS. O número da sobreposição é estimativa do tap de estatística, não uma medição de ponta a ponta com fotodiodo. Ela não foi medida em hardware neste repositório.
-- O buffer do `AVCaptureAudioPreviewOutput` não tem ajuste público.
-- A sobreposição de dados acrescenta um data output. Desligue com `I` para o caminho mínimo.
-- Cam Link 4K: 1080p60 ou 4K30, não 4K60.
-- Plataform view no macOS ainda tem arestas. O duplo clique depende do `NSView` devolver `nil` no hit test. `F` e `⌘⌃F` não dependem disso.
-- A tela não apaga durante a sessão. Suspender pela tampa continua possível.
-- O áudio do jogo fica no Mac. O iPhone recebe só vídeo.
+- One app at a time on the Cam Link. See the OBS section.
+- Content with HDCP on doesn't show. The switch is the console's.
+- The app doesn't record. Streaming is LAN-only, to the iPhone receiver (see below).
+- Real latency depends on the Cam Link, the USB port and macOS. The overlay number is an estimate from the stats tap, not an end-to-end photodiode measurement.
+- The `AVCaptureAudioPreviewOutput` buffer has no public setting.
+- The stats overlay adds a data output. Turn it off with `I` for the minimal path.
+- Cam Link 4K: 1080p60 or 4K30, not 4K60.
+- Platform views on macOS still have rough edges. Double-click depends on the `NSView` returning `nil` from hit testing. `F` and `⌘⌃F` don't depend on that.
+- The display doesn't sleep during the session. Suspending via the lid is still possible.
+- Game audio stays on the Mac. The iPhone only receives video.
+- The UI is in Brazilian Portuguese.
 
-## Onde está o código
+## Where the code is
 
-- `lib/` — interface em pt-BR, atalhos, barra, estado.
-- `packages/captura_capture/` — API Dart testável (escolha de dispositivo, formato e o protocolo da rede) e o plugin Swift.
-- `CaptureEngine.swift` — sessão, formatos, áudio, sono da tela.
-- `LanSender.swift` — H.264 e o servidor na LAN. Só entra como `CaptureMediaSink` enquanto a transmissão está ligada.
-- `CapturaReceiverPlugin.swift` — receptor do iPhone.
-- `lib/src/lan_protocol.dart` — o formato dos bytes. O Swift (`LanWire.swift`) tem de bater com ele.
+- `lib/` — UI (pt-BR), shortcuts, bar, state.
+- `packages/captura_capture/` — testable Dart API (device and format selection, the network protocol) and the Swift plugin.
+- `CaptureEngine.swift` — session, formats, audio, display sleep.
+- `LanSender.swift` — H.264 and the LAN server. It only joins as a `CaptureMediaSink` while streaming is on.
+- `CapturaReceiverPlugin.swift` — the iPhone receiver.
+- `lib/src/lan_protocol.dart` — the byte format. The Swift side (`LanWire.swift`) has to match it.
+- `packages/interop_lab/` — a lab comparing MethodChannel, Pigeon and direct FFI between Dart and Swift (see its README).
 
-## Transmitir para o iPhone
+## Streaming to the iPhone
 
-O mesmo projeto Flutter vira receptor no iPhone. No Mac, com a captura já rodando, toque em **Transmitir na rede**. O app anuncia `_capturaplay._tcp` (Bonjour) e escuta TCP na porta **47731**. O vídeo é H.264 em hardware (VideoToolbox): tempo real, sem frame B. No ritmo **Suave** o perfil é High (CABAC), o GOP fica em cerca de 2 s e um keyframe extra só sai quando um quadro é descartado. **Ultra baixa latência** continua em Constrained Baseline, GOP de 0,5 s e um único envio em voo. A taxa padrão é 1080p a 20 Mb/s; a barra escolhe 10, 20 ou 30 Mb/s e 720p ou 1080p. O encoder não usa mais um teto de 1 segundo que esmagava o keyframe, e recusa QP pior que 32 no Suave (38 no Ultra) quando o sistema aceita `MaxAllowedFrameQP`.
+The same Flutter project becomes a receiver on the iPhone. On the Mac, with capture already running, click **Transmitir na rede** (stream on the network). The app advertises `_capturaplay._tcp` (Bonjour) and listens on TCP port **47731**. Video is hardware H.264 (VideoToolbox): real time, no B-frames. In **Suave** (smooth) pacing the profile is High (CABAC), the GOP is about 2 s, and an extra keyframe is only sent when a frame is dropped. **Ultra baixa latência** (ultra low latency) stays on Constrained Baseline, a 0.5 s GOP and a single send in flight. The default rate is 1080p at 20 Mb/s; the bar picks 10, 20 or 30 Mb/s and 720p or 1080p. The encoder no longer uses a 1-second cap that crushed the keyframe, and refuses a QP worse than 32 in Suave (38 in Ultra) when the system accepts `MaxAllowedFrameQP`.
 
-A prévia de quem joga no Mac continua no `AVCaptureVideoPreviewLayer`. O encoder não desenha essa prévia. Ele só existe com a transmissão ligada, numa fila própria, e descarta o quadro se ainda estiver ocupado com o anterior. O áudio local não muda: continua no `AVCaptureAudioPreviewOutput`. O iPhone fica sem som. Áudio no stream é um TODO de propósito, para não mexer nesse caminho.
+The preview for the player on the Mac stays on `AVCaptureVideoPreviewLayer`. The encoder doesn't draw that preview. It only exists while streaming is on, on its own queue, and drops the frame if it is still busy with the previous one. Local audio doesn't change: it stays on `AVCaptureAudioPreviewOutput`. The iPhone has no sound. Audio in the stream is a deliberate TODO, so that path isn't touched.
 
-No iPhone (Flutter 3.47.5, iOS 16 ou mais novo), o aparelho e o Mac na mesma Wi-Fi, sem VPN e sem isolamento de cliente no roteador:
+On the iPhone (iOS 16 or later), with the phone and the Mac on the same Wi-Fi, no VPN and no client isolation on the router:
 
 ```bash
 flutter pub get
 flutter devices
-flutter run -d <id-do-iphone>
+flutter run -d <iphone-id>
 ```
 
-Na primeira vez o Xcode pede um time de assinatura. Abra `ios/Runner.xcworkspace` (ou `ios/Runner.xcodeproj`, se o Flutter local usar Swift Package Manager), no alvo Runner → Signing & Capabilities, escolha o seu Apple Team e deixe o bundle `dev.capturaplay.capturaplay`. O iPhone precisa confiar no perfil de desenvolvimento em Ajustes → Geral → VPN e gerenciamento de dispositivo.
+The first time, Xcode asks for a signing team. Open `ios/Runner.xcworkspace` (or `ios/Runner.xcodeproj`, if your local Flutter uses Swift Package Manager), go to the Runner target → Signing & Capabilities, pick your Apple Team and set your bundle id. The iPhone has to trust the development profile in Settings → General → VPN & Device Management.
 
-O app abre deitado, sem barra de status, e procura o Mac sozinho. Se o Bonjour não aparecer, digite o IP do Mac. A permissão de rede local tem de ser aceita. Toque na imagem para ver os dados (fps e latência estimada) e para desconectar. Se a ligação cair, ele tenta de novo. A tela não apaga enquanto o receptor está aberto.
+The app opens in landscape, without a status bar, and finds the Mac by itself. If Bonjour doesn't show up, type the Mac's IP. The local network permission must be accepted. Tap the image to see the stats (fps and estimated latency) and to disconnect. If the connection drops, it tries again. The display doesn't sleep while the receiver is open.
 
-1080p no Ultra usa perfil High sem frame B e, ao entrar nesse ritmo, cai para 12 Mb/s (10 Mb/s escolhido à mão fica). O quadro nativo em 420v ou BGRA não é copiado de novo antes do encoder. 720p Ultra não muda de perfil nem de taxa. A linha `1080p · último` no iPhone é o quadro que acabou de chegar; o `p50/p95/max` de cada etapa continua no resumo.
+1080p in Ultra uses the High profile without B-frames and, when entering that pacing, drops to 12 Mb/s (10 Mb/s picked by hand stays). The native frame in 420v or BGRA isn't copied again before the encoder. 720p Ultra doesn't change profile or rate. The `1080p · último` line on the iPhone is the frame that just arrived; each stage's `p50/p95/max` stays in the summary.
 
-O modo **Latência** manda 720p a 15 Mb/s. **Qualidade** usa 1080p a 20 Mb/s. O ritmo **Suave** (padrão) deixa dois ou três quadros no caminho para o movimento não pular e continua em TCP. **Ultra baixa latência** manda o vídeo em UDP (pedaços de 1200 bytes). Um pedaço perdido expira em 8 ms e o iPhone pede um keyframe na hora; o GOP do Ultra é cerca de 8 quadros para a imagem não ficar esperando meio segundo. O telefone mostra só o quadro decodificado mais novo. Os dois lados mandam um UDP pequeno a cada 4 ms e marcam o tráfego como vídeo interativo (a classe que o sistema traduz em DSCP), para o rádio do iPhone não dormir entre beacons de 102,4 ms. O encoder solta cada quadro na hora (`CompleteFrames`). No iPhone o Suave solta cada quadro na hora do PTS de origem (59,94 ou 60). Os dados mostram p50/p95/max dos últimos 2 s, quantos quadros passaram de 50 ms e qual etapa dominou. Se `off` for muito maior que `rtt`, o número inclui o relógio.
+**Latência** (latency) mode sends 720p at 15 Mb/s. **Qualidade** (quality) uses 1080p at 20 Mb/s. **Suave** pacing (the default) keeps two or three frames in flight so motion doesn't skip, and stays on TCP. **Ultra baixa latência** sends video over UDP (1200-byte chunks). A lost chunk expires in 8 ms and the iPhone asks for a keyframe right away; the Ultra GOP is about 8 frames so the image doesn't wait half a second. The phone only shows the newest decoded frame. Both sides send a small UDP packet every 4 ms and mark the traffic as interactive video (the class the system maps to DSCP), so the iPhone's radio doesn't sleep between 102.4 ms beacons. The encoder emits each frame immediately (`CompleteFrames`). On the iPhone, Suave releases each frame at its source PTS (59.94 or 60). The stats show p50/p95/max over the last 2 s, how many frames went over 50 ms, and which stage dominated. If `off` is much larger than `rtt`, the number includes clock offset.
 
-Picos de ~100 ms com a etapa **rede** no topo batem com o beacon do Wi-Fi ou com o AWDL do Mac (AirDrop, Continuity, Sidecar). O app vê se `awdl0` existe e avisa na barra, mas não desliga isso: no Mac seria `sudo ifconfig awdl0 down`, e a interface volta sozinha. Para jogar, desligue o AirDrop e solte o Sidecar. O Console do Mac registra `intervalo de envio` quando o próprio envio pausa mais de 50 ms.
+Spikes of ~100 ms with the **rede** (network) stage on top line up with the Wi-Fi beacon or with the Mac's AWDL (AirDrop, Continuity, Sidecar). The app checks whether `awdl0` exists and warns in the bar, but doesn't turn it off: on the Mac that would be `sudo ifconfig awdl0 down`, and the interface comes back on its own. To play, turn AirDrop off and disconnect Sidecar. The Mac's Console logs `intervalo de envio` (send interval) when sending itself pauses for more than 50 ms.
 
-O número no iPhone, “captura → vidro”, vai do instante em que o quadro entrou no sink no Mac até o próximo vsync em que o iPhone o apresenta, com o relógio alinhado por um ping no estilo NTP. Não é fotodiodo. “Rede” conta buracos na sequência. “Tela” conta quadro que saiu do buffer sem ser mostrado. “Espera IDR” conta o que chegou enquanto o decoder estava sem referência. No Suave, fps na tela deve ficar ao lado dos fps que chegam. O Console do Mac mostra a mesma divisão (`category` `lan` no Mac, `lan.recv` no iPhone) cerca de uma vez por segundo.
+The number on the iPhone, "captura → vidro" (capture → glass), runs from the moment the frame entered the sink on the Mac to the next vsync in which the iPhone presents it, with clocks aligned by an NTP-style ping. It isn't a photodiode. "Rede" (network) counts gaps in the sequence. "Tela" (display) counts frames that left the buffer without being shown. "Espera IDR" (IDR wait) counts what arrived while the decoder had no reference. In Suave, displayed fps should sit next to received fps. The Mac's Console shows the same breakdown (`category` `lan` on the Mac, `lan.recv` on the iPhone) about once per second.
 
-O fio é TCP com mensagens `CPL1`: configuração H.264 (SPS/PPS, e no final a taxa em Mb/s e o teto de QP) e quadros em AVCC, com tamanho de NAL de 4 bytes. O iPhone monta um `CMSampleBuffer` e entrega para um `AVSampleBufferDisplayLayer`, que decodifica e mostra sem passar pela textura do Flutter. No Suave o quadro atrasado espera o PTS dele; não é jogado fora só porque chegou cedo ou a camada estava ocupada. No Ultra, o quadro que não cabe é descartado e os P-frames seguintes esperam um keyframe. Só um aparelho por vez: uma ligação nova substitui a anterior.
+The wire is TCP with `CPL1` messages: H.264 configuration (SPS/PPS, and at the end the rate in Mb/s and the QP cap) and frames in AVCC, with a 4-byte NAL length. The iPhone builds a `CMSampleBuffer` and hands it to an `AVSampleBufferDisplayLayer`, which decodes and displays without going through Flutter's texture. In Suave, a late frame waits for its PTS; it isn't thrown away just because it arrived early or the layer was busy. In Ultra, a frame that doesn't fit is dropped and the following P-frames wait for a keyframe. Only one device at a time: a new connection replaces the previous one.
 
-O tipo de mensagem `0x30` está reservado para o controle do iPhone voltar ao Mac. O formato está em `LanInputReport` e tem teste. Ninguém envia isso ainda.
+Message type `0x30` is reserved for the iPhone's controller input going back to the Mac. The format is in `LanInputReport` and is tested. Nothing sends it yet.
 
-Limites desta transmissão:
+Limits of this stream:
 
-- Sem áudio no iPhone.
-- Wi-Fi 5 GHz ou cabo no Mac. 2,4 GHz costuma não aguentar 1080p60.
-- O firewall do macOS pode pedir permissão na primeira vez.
-- Release precisa de `com.apple.security.network.server` e `network.client` (já estão nos entitlements) e de `NSLocalNetworkUsageDescription` / `NSBonjourServices` nos dois Info.plist.
-- TV webOS / Tizen / browser continuam fora. O protocolo não é WebRTC.
+- No audio on the iPhone.
+- 5 GHz Wi-Fi or Ethernet on the Mac. 2.4 GHz usually can't keep up with 1080p60.
+- The macOS firewall may ask for permission the first time.
+- Release needs `com.apple.security.network.server` and `network.client` (already in the entitlements) and `NSLocalNetworkUsageDescription` / `NSBonjourServices` in both Info.plist files.
+- webOS / Tizen TVs and browsers are still out. The protocol isn't WebRTC.
 
-## O que este ambiente verificou
+## Tests
 
-O ambiente em que o projeto foi escrito é Linux. Ele não compila target macOS e não abre câmera.
+```bash
+flutter analyze
+flutter test
+```
 
-Rodou aqui:
-
-- `flutter analyze` no app e no plugin
-- `flutter test` no app e no plugin (escolha de dispositivo e formato, textos, decodificação do estado nativo, controlador com um cliente falso, a tela sem hardware, e o enquadramento do protocolo da rede)
-
-Ainda precisa de um Mac e de um iPhone de verdade:
-
-- `flutter run -d macos` e `flutter build macos` no Xcode
-- diálogo de câmera e microfone, e o app sandboxed enxergando o Cam Link
-- 1080p60 de fato, aspecto da imagem, áudio sem estalo e sincronia
-- tela cheia, cursor, volume, mudo, sono da tela
-- o número da latência com o Cam Link ligado, com a sobreposição ligada e desligada
-- OBS capturando a janela enquanto o CapturaPlay segura o USB, e o erro quando o OBS segura o USB primeiro
-- `flutter run -d macos` com “Transmitir na rede” ligado, e `flutter run -d <iphone>` no mesmo Wi-Fi
-- Bonjour, a permissão de rede local, a porta 47731, 1080p e 720p, e a latência estimada no telefone
-- a prévia do Mac continuar lisa com a transmissão ligada
+Run them in the app and in `packages/captura_capture`. They cover device and format selection, copy, decoding the native state, the controller against a fake client (including the automatic Cam Link recovery), the screen without hardware, and the network protocol framing.
